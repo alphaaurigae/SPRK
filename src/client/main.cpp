@@ -214,16 +214,23 @@ inline PQKeypair load_pqsig_keypair(const KeyPath &path,
 #endif
 }
 
-// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) - parameters have distinct semantic meaning
-inline PQKeypair derive_ephemeral_for_peer([[maybe_unused]] const secure_vector &identity_sk,
-                                           [[maybe_unused]] const std::string   &session_id_param,
-                                           [[maybe_unused]] const std::string   &peer_name)
+struct SessionId {
+    std::string value;
+};
+
+struct PeerName {
+    std::string value;
+};
+
+inline PQKeypair derive_ephemeral_for_peer(const secure_vector& identity_sk,
+                                           const SessionId& session_id,
+                                           const PeerName& peer)
 {
 #ifdef USE_LIBOQS
-    std::vector<unsigned char> salt(session_id_param.begin(), session_id_param.end());
-    salt.insert(salt.end(), peer_name.begin(), peer_name.end());
+    std::vector<unsigned char> salt(session_id.value.begin(), session_id.value.end());
+    salt.insert(salt.end(), peer.value.begin(), peer.value.end());
 
-    OQS_KEM *kem = OQS_KEM_new("Kyber512");
+    OQS_KEM* kem = OQS_KEM_new("Kyber512");
     if (kem == nullptr)
         throw std::runtime_error("pqkem new failed");
 
@@ -336,278 +343,341 @@ static void rotate_ephemeral_if_needed(int sock, const std::string &peer_fp)
                 "] rotated ephemeral key for peer_fp " + peer_fp);
 }
 
-void handle_hello(const Parsed &p, int sock)
+
+
+
+
+
+
+
+
+
+
+
+
+
+static bool check_hello_signature(const Parsed &p, const std::string &peer_name, int64_t ms)
 {
-    const std::string peer_name = trim(p.username);
-    const auto        ms        = now_ms();
+    std::vector<unsigned char> sig_data;
+    sig_data.reserve(p.eph_pk.size() + p.session_id.size());
+    sig_data.insert(sig_data.end(), p.eph_pk.begin(), p.eph_pk.end());
+    sig_data.insert(sig_data.end(), p.session_id.begin(), p.session_id.end());
 
-    if (!is_valid_username(peer_name))
+    const bool sig_ok = (p.id_alg == ALGO_MLDSA87) ? pqsig_verify("ML-DSA-87", p.identity_pk, sig_data, p.signature) : false;
+    if (!sig_ok)
+        dev_println("[" + std::to_string(ms) + "] REJECTED: invalid signature from " + peer_name);
+    return sig_ok;
+}
+
+static std::string build_key_context_for_peer(const std::string &peer_fp_hex_ref, const std::string &peer_name)
+{
+    if (!my_fp_hex.empty() && !peer_fp_hex_ref.empty())
+        return (my_fp_hex < peer_fp_hex_ref) ? (my_fp_hex + "|" + peer_fp_hex_ref) : (peer_fp_hex_ref + "|" + my_fp_hex);
+
+    return (my_username < peer_name) ? (my_username + "|" + peer_name) : (peer_name + "|" + my_username);
+}
+
+static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p, const std::string &key_context, const std::string &peer_name, int64_t ms)
+{
+    try
     {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: invalid username format");
-        return;
+        const secure_vector shared = pqkem_decaps("Kyber512", p.encaps, my_eph_sk);
+        pi.sk = derive_shared_key_from_secret(shared, key_context);
+        dev_println("[" + std::to_string(ms) + "] DEBUG decaps: my=" + my_username + " peer=" + peer_name + " context=" + key_context + " keysize=" + std::to_string(pi.sk.key.size()));
+        pi.ready = true;
+        pi.identity_verified = true;
+        return true;
     }
-
-    if (peer_name == my_username)
+    catch (const std::exception &e)
     {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: self-connection attempt");
+        dev_println("[" + std::to_string(ms) + "] REJECTED: decapsulation failed for " + peer_name + " error=" + e.what());
+        return false;
+    }
+}
+
+static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p, const std::string &key_context, int sock, const std::string &peer_name, int64_t ms)
+{
+    try
+    {
+        const auto enc_pair = pqkem_encaps("Kyber512", std::vector<unsigned char>(pi.eph_pk.begin(), pi.eph_pk.end()));
+        const std::vector<unsigned char> encaps_ct = enc_pair.first;
+        const secure_vector shared = enc_pair.second;
+
+        pi.sk = derive_shared_key_from_secret(shared, key_context);
+        dev_println("[" + std::to_string(ms) + "] DEBUG encaps: my=" + my_username + " peer=" + peer_name + " context=" + key_context + " keysize=" + std::to_string(pi.sk.key.size()));
+
+        pi.ready = true;
+        pi.identity_verified = true;
+
+        std::vector<unsigned char> sig_data2;
+        sig_data2.reserve(my_eph_pk.size() + p.session_id.size());
+        sig_data2.insert(sig_data2.end(), my_eph_pk.begin(), my_eph_pk.end());
+        sig_data2.insert(sig_data2.end(), p.session_id.begin(), p.session_id.end());
+
+        const std::vector<unsigned char> signature_vec = pqsig_sign(
+            "ML-DSA-87",
+            std::vector<unsigned char>(my_identity_sk.begin(), my_identity_sk.end()),
+            sig_data2);
+
+        const std::vector<unsigned char> identity_pk_vec(my_identity_pk.begin(), my_identity_pk.end());
+        const auto reply = build_hello(my_username, ALGO_KYBER512,
+                                       std::vector<unsigned char>(my_eph_pk.begin(), my_eph_pk.end()),
+                                       ALGO_MLDSA87, identity_pk_vec, signature_vec,
+                                       encaps_ct, p.session_id);
+        full_send(sock, reply.data(), reply.size());
+        pi.sent_hello = true;
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: encapsulation failed for reply to " + peer_name + " error=" + e.what());
+        return false;
+    }
+}
+
+
+
+
+
+
+
+bool validate_username(const std::string& peer_name, uint64_t ms) {
+    if (!is_valid_username(peer_name)) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: invalid username format");
+        return false;
+    }
+    if (peer_name == my_username) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: self-connection attempt");
+        return false;
+    }
+    return true;
+}
+
+std::string compute_peer_key(const Parsed& p, std::string& peer_fp_hex) {
+    if (!p.identity_pk.empty()) {
+        const auto fp = fingerprint_sha256(p.identity_pk);
+        peer_fp_hex = fingerprint_to_hex(fp);
+        return peer_fp_hex;
+    }
+    return "uname:" + trim(p.username);
+}
+
+void update_peer_info(PeerInfo& pi, const std::string& peer_name, const std::string& peer_fp_hex, std::unordered_set<std::string>& fps_set) {
+    pi.username = peer_name;
+    if (!peer_fp_hex.empty()) {
+        fps_set.insert(peer_fp_hex);
+        pi.peer_fp_hex = peer_fp_hex;
+    } else {
+        const std::string peer_key = "uname:" + peer_name;
+        fps_set.insert(peer_key);
+        pi.peer_fp_hex = peer_key;
+    }
+}
+
+
+
+
+
+
+// --- Fixed helper functions (compatible with original handle_hello) ---
+
+bool check_peer_limits(const std::string& peer_key, uint64_t ms) {
+    if (peers.size() >= MAX_PEERS && peers.find(peer_key) == peers.end()) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: max peers limit reached");
+        return false;
+    }
+    return true;
+}
+
+bool check_rate_and_signature(PeerInfo& pi, const Parsed& p, const std::string& peer_name, uint64_t ms) {
+    if (!check_rate_limit(pi)) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: rate limit exceeded for " + peer_name);
+        return false;
+    }
+    if (!check_hello_signature(p, peer_name, ms)) {
+        return false;
+    }
+    return true;
+}
+
+bool detect_key_changes(const PeerInfo& pi, const Parsed& p, bool& pk_changed, bool& has_new_encaps) {
+    const bool had_eph_pk = !pi.eph_pk.empty();
+    pk_changed = had_eph_pk &&
+        (pi.eph_pk.size() != p.eph_pk.size() ||
+         !std::equal(pi.eph_pk.begin(), pi.eph_pk.end(), p.eph_pk.begin()));
+    has_new_encaps = !p.encaps.empty() && had_eph_pk && !pi.ready;
+    return !had_eph_pk || pk_changed || has_new_encaps;
+}
+
+void handle_rekey(PeerInfo& pi, const std::string& peer_name, uint64_t ms) {
+    pi.recv_seq = 0;
+    pi.send_seq = 0;
+    pi.ready = false;
+    pi.sent_hello = false;
+    pi.sk.key.clear();
+    pi.identity_verified = false;
+    std::cout << "[" << ms << "] peer " << peer_name << " rekeyed\n";
+}
+
+void update_keys_and_log_connect(PeerInfo& pi, const Parsed& p, const std::string& peer_name, uint64_t ms) {
+    pi.eph_pk = secure_vector(p.eph_pk.begin(), p.eph_pk.end());
+    pi.identity_pk = secure_vector(p.identity_pk.begin(), p.identity_pk.end());
+
+    const std::string ts = format_hhmmss(ms);
+    std::string shortpk = "(no pk)";
+    if (!p.identity_pk.empty()) {
+        const std::string hexpk = to_hex(p.identity_pk.data(), p.identity_pk.size());
+        shortpk = (hexpk.size() > 20)
+            ? hexpk.substr(0, 10) + "..." + hexpk.substr(hexpk.size() - 10)
+            : hexpk;
+    }
+    std::cout << "[" << ts << "] connect " << peer_name << " pubkey=" << shortpk << "\n";
+}
+
+bool get_expected_lengths(size_t& expected_pk_len, size_t& expected_ct_len, uint64_t ms) {
+#ifdef USE_LIBOQS
+    OQS_KEM* kem = OQS_KEM_new("Kyber512");
+    if (kem == nullptr) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: kem init failed");
+        return false;
+    }
+    expected_pk_len = kem->length_public_key;
+    expected_ct_len = kem->length_ciphertext;
+    OQS_KEM_free(kem);
+#else
+    expected_pk_len = 0;
+    expected_ct_len = 0;
+#endif
+    return true;
+}
+
+bool validate_eph_pk_length(const Parsed& p, size_t expected_pk_len, const std::string& peer_name, uint64_t ms) {
+    if (p.eph_pk.size() != expected_pk_len) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: bad eph_pk length from " + peer_name);
+        return false;
+    }
+    return true;
+}
+
+bool handle_encaps_present(PeerInfo& pi, const Parsed& p, size_t expected_ct_len,
+                           const std::string& key_context, const std::string& peer_name, uint64_t ms) {
+    if (p.encaps.size() != expected_ct_len) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: bad encaps length from " + peer_name);
+        return false;
+    }
+    return try_handle_decaps_and_set_ready(pi, p, key_context, peer_name, ms);
+}
+
+bool handle_initiator_no_encaps(PeerInfo& pi, const Parsed& p, size_t expected_pk_len,
+                                const std::string& key_context, int sock,
+                                const std::string& peer_name, uint64_t ms) {
+    if (pi.eph_pk.size() != expected_pk_len) {
+        dev_println("[" + std::to_string(ms) + "] INFO: missing peer eph_pk for " + peer_name + ", awaiting encaps");
+        return false;
+    }
+    return try_handle_initiator_encaps(pi, p, key_context, sock, peer_name, ms);
+}
+
+void log_awaiting_encaps(const std::string& peer_name, uint64_t ms) {
+    std::cout << "[" << ms << "] INFO: awaiting encaps from " << peer_name << "\n";
+}
+
+void log_ready_if_new(const PeerInfo& pi, const std::string& peer_name, uint64_t ms, bool was_ready) {
+    if (!was_ready && pi.ready) {
+        std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
+    }
+}
+
+
+
+void handle_hello(const Parsed& p, int sock) {
+    const std::string peer_name = trim(p.username);
+    const auto ms = now_ms();
+
+    if (!validate_username(peer_name, ms)) {
         return;
     }
 
     const std::lock_guard<std::mutex> lk(peers_mtx);
 
     std::string peer_fp_hex;
-    if (!p.identity_pk.empty())
-    {
-        const auto fp = fingerprint_sha256(p.identity_pk);
-        peer_fp_hex = fingerprint_to_hex(fp);
-    }
+    const std::string peer_key = compute_peer_key(p, peer_fp_hex);
 
-    const std::string peer_key =
-        !peer_fp_hex.empty() ? peer_fp_hex : ("uname:" + peer_name);
+    auto& pi = peers[peer_key];
+    auto& fps_set = fps_by_username[peer_name];
+    update_peer_info(pi, peer_name, peer_fp_hex, fps_set);
 
-    auto &pi    = peers[peer_key];
-    pi.username = peer_name;
-
-    auto &fps_set = fps_by_username[peer_name];
-    if (!peer_fp_hex.empty())
-    {
-        fps_set.insert(peer_fp_hex);
-        pi.peer_fp_hex = peer_fp_hex;
-    }
-    else
-    {
-        fps_set.insert(peer_key);
-        pi.peer_fp_hex = peer_key;
-    }
-
-    if (peers.size() >= MAX_PEERS && peers.find(peer_key) == peers.end())
-    {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: max peers limit reached");
+    if (!check_peer_limits(peer_key, ms)) {
         return;
     }
 
-    if (!check_rate_limit(pi))
-    {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: rate limit exceeded for " + peer_name);
+    if (!check_rate_and_signature(pi, p, peer_name, ms)) {
         return;
     }
 
-    std::vector<unsigned char> sig_data;
-    sig_data.reserve(p.eph_pk.size() + p.session_id.size());
-    sig_data.insert(sig_data.end(), p.eph_pk.begin(), p.eph_pk.end());
-    sig_data.insert(sig_data.end(), p.session_id.begin(), p.session_id.end());
+    bool pk_changed = false;
+    bool has_new_encaps = false;
+    const bool needs_key_handling = detect_key_changes(pi, p, pk_changed, has_new_encaps);
 
-    const bool sig_ok = (p.id_alg == ALGO_MLDSA87) 
-        ? pqsig_verify("ML-DSA-87", p.identity_pk, sig_data, p.signature)
-        : false;
-
-    if (!sig_ok)
-    {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: invalid signature from " + peer_name);
+    if (!needs_key_handling) {
         return;
     }
 
-    const bool had_eph_pk = !pi.eph_pk.empty();
-    const bool pk_changed =
-        had_eph_pk &&
-        (pi.eph_pk.size() != p.eph_pk.size() ||
-         !std::equal(pi.eph_pk.begin(), pi.eph_pk.end(), p.eph_pk.begin()));
+    dev_println("[" + std::to_string(ms) + "] DEBUG: had_eph_pk=" + (!pi.eph_pk.empty() ? "1" : "0") + " pk_changed=" + (pk_changed ? "1" : "0") + " peer=" + peer_name + " encaps_empty=" + (p.encaps.empty() ? "1" : "0") + " has_new_encaps=" + (has_new_encaps ? "1" : "0"));
 
-    const bool has_new_encaps = !p.encaps.empty() && had_eph_pk && !pi.ready;
+    if (pk_changed) {
+        handle_rekey(pi, peer_name, ms);
+    }
 
-    if (!had_eph_pk || pk_changed || has_new_encaps)
-    {
-        dev_println("[" + std::to_string(ms) +
-                    "] DEBUG: had_eph_pk=" + (had_eph_pk ? "1" : "0") +
-                    " pk_changed=" + (pk_changed ? "1" : "0") +
-                    " peer=" + peer_name +
-                    " encaps_empty=" + (p.encaps.empty() ? "1" : "0") +
-                    " has_new_encaps=" + (has_new_encaps ? "1" : "0"));
-        if (pk_changed)
-        {
-            pi.recv_seq   = 0;
-            pi.send_seq   = 0;
-            pi.ready      = false;
-            pi.sent_hello = false;
-            pi.sk.key.clear();
-            pi.identity_verified = false;
-            std::cout << "[" << ms << "] peer " << peer_name << " rekeyed\n";
-        }
+    update_keys_and_log_connect(pi, p, peer_name, ms);
 
-        pi.eph_pk = secure_vector(p.eph_pk.begin(), p.eph_pk.end());
-        pi.identity_pk =
-            secure_vector(p.identity_pk.begin(), p.identity_pk.end());
+    size_t expected_pk_len = 0;
+    size_t expected_ct_len = 0;
+    if (!get_expected_lengths(expected_pk_len, expected_ct_len, ms)) {
+        return;
+    }
 
-        {
-            const std::string ts      = format_hhmmss(ms);
-            std::string shortpk = "(no pk)";
-            if (!p.identity_pk.empty())
-            {
-                const std::string hexpk =
-                    to_hex(p.identity_pk.data(), p.identity_pk.size());
-                if (hexpk.size() > 20)
-                {
-                    shortpk = hexpk.substr(0, 10) + "..." +
-                              hexpk.substr(hexpk.size() - 10);
-                }
-                else
-                {
-                    shortpk = hexpk;
-                }
-            }
-            std::cout << "[" << ts << "] connect " << peer_name
-                      << " pubkey=" << shortpk << "\n";
-        }
+    if (!validate_eph_pk_length(p, expected_pk_len, peer_name, ms)) {
+        return;
+    }
 
-        const std::string &peer_fp_hex_ref = peer_fp_hex;
-        const bool initiator = my_fp_hex < peer_fp_hex_ref;
+    const std::string key_context = build_key_context_for_peer(peer_fp_hex, peer_name);
+    const bool initiator = my_fp_hex < peer_fp_hex;
 
-#ifdef USE_LIBOQS
-        OQS_KEM *kem = OQS_KEM_new("Kyber512");
-        if (kem == nullptr)
-        {
-            dev_println("[" + std::to_string(ms) +
-                        "] REJECTED: kem init failed");
-            return;
-        }
-        const size_t expected_pk_len = kem->length_public_key;
-        const size_t expected_ct_len = kem->length_ciphertext;
-        OQS_KEM_free(kem);
-#else
-        constexpr size_t expected_pk_len = 0;
-        constexpr size_t expected_ct_len = 0;
-#endif
+    const bool was_ready = pi.ready;
 
-        if (p.eph_pk.size() != expected_pk_len)
-        {
-            dev_println("[" + std::to_string(ms) +
-                        "] REJECTED: bad eph_pk length from " + peer_name);
-            return;
-        }
+    bool success = true;
+    if (!p.encaps.empty()) {
+        success = handle_encaps_present(pi, p, expected_ct_len, key_context, peer_name, ms);
+    } else if (initiator && pi.sk.key.empty() && !pi.sent_hello) {
+        success = handle_initiator_no_encaps(pi, p, expected_pk_len, key_context, sock, peer_name, ms);
+    } else {
+        log_awaiting_encaps(peer_name, ms);
+        return;
+    }
 
-std::string key_context;
-if (!my_fp_hex.empty() && !peer_fp_hex_ref.empty()) {
-    key_context = (my_fp_hex < peer_fp_hex_ref)
-        ? (my_fp_hex + "|" + peer_fp_hex_ref)
-        : (peer_fp_hex_ref + "|" + my_fp_hex);
-} else {
-    key_context = (my_username < peer_name)
-        ? (my_username + "|" + peer_name)
-        : (peer_name + "|" + my_username);
+    if (!success) {
+        return;
+    }
+
+    log_ready_if_new(pi, peer_name, ms, was_ready);
 }
-        if (!p.encaps.empty())
-        {
-            if (p.encaps.size() != expected_ct_len)
-            {
-                dev_println("[" + std::to_string(ms) +
-                            "] REJECTED: bad encaps length from " + peer_name);
-                return;
-            }
-            try
-            {
-                const secure_vector shared =
-                    pqkem_decaps("Kyber512", p.encaps, my_eph_sk);
-                pi.sk = derive_shared_key_from_secret(shared, key_context);
-                dev_println("[" + std::to_string(ms) +
-                            "] DEBUG decaps: my=" + my_username +
-                            " peer=" + peer_name + " context=" + key_context +
-                            " keysize=" + std::to_string(pi.sk.key.size()));
 
-                pi.ready             = true;
-                pi.identity_verified = true;
-            }
-            catch (const std::exception &e)
-            {
-                dev_println("[" + std::to_string(ms) +
-                            "] REJECTED: decapsulation failed for " +
-                            peer_name + " error=" + e.what());
-                return;
-            }
-        }
-        else if (initiator && pi.sk.key.empty() && !pi.sent_hello)
-        {
-            if (pi.eph_pk.size() != expected_pk_len)
-            {
-                dev_println("[" + std::to_string(ms) +
-                            "] INFO: missing peer eph_pk for " + peer_name +
-                            ", awaiting encaps");
-                return;
-            }
-            try
-            {
-                const auto enc_pair = pqkem_encaps(
-                    "Kyber512", std::vector<unsigned char>(pi.eph_pk.begin(),
-                                                           pi.eph_pk.end()));
-                const std::vector<unsigned char> encaps_ct = enc_pair.first;
-                const secure_vector              shared    = enc_pair.second;
 
-                pi.sk = derive_shared_key_from_secret(shared, key_context);
-                dev_println("[" + std::to_string(ms) +
-                            "] DEBUG encaps: my=" + my_username +
-                            " peer=" + peer_name + " context=" + key_context +
-                            " keysize=" + std::to_string(pi.sk.key.size()));
 
-                pi.ready             = true;
-                pi.identity_verified = true;
 
-                std::vector<unsigned char> sig_data2;
-                sig_data2.reserve(my_eph_pk.size() + session_id.size());
-                sig_data2.insert(sig_data2.end(), my_eph_pk.begin(),
-                                 my_eph_pk.end());
-                sig_data2.insert(sig_data2.end(), session_id.begin(),
-                                 session_id.end());
 
-                const std::vector<unsigned char> signature_vec = pqsig_sign(
-                    "ML-DSA-87",
-                    std::vector<unsigned char>(my_identity_sk.begin(),
-                                               my_identity_sk.end()),
-                    sig_data2);
 
-                const std::vector<unsigned char> identity_pk_vec(
-                    my_identity_pk.begin(), my_identity_pk.end());
-                const auto reply =
-                    build_hello(my_username, ALGO_KYBER512,
-                                std::vector<unsigned char>(my_eph_pk.begin(),
-                                                           my_eph_pk.end()),
-                                ALGO_MLDSA87, identity_pk_vec, signature_vec,
-                                encaps_ct, session_id);
-                full_send(sock, reply.data(), reply.size());
-                pi.sent_hello = true;
-            }
-            catch (const std::exception &e)
-            {
-                dev_println("[" + std::to_string(ms) +
-                            "] REJECTED: encapsulation failed for reply to " +
-                            peer_name + " error=" + e.what());
-                return;
-            }
-        }
-        else
-        {
-            std::cout << "[" << ms << "] INFO: awaiting encaps from "
-                      << peer_name << "\n";
-            return;
-        }
 
-        const bool was_ready = pi.ready;
-        if (!was_ready && pi.ready)
-        {
-            std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
-        }
-    }
-}
+
+
 
 void handle_chat(const Parsed &p)
 {
     const std::string peer_from = trim(p.from);
     const auto        ms        = now_ms();
 
-    if (!is_valid_username(peer_from))
+    if (!is_valid_username(peer_from)) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: invalid sender username");
@@ -615,11 +685,11 @@ void handle_chat(const Parsed &p)
     }
 
     std::string peer_key;
-    if (!p.identity_pk.empty())
+    if (!p.identity_pk.empty()) [[likely]]
     {
         peer_key = to_hex(p.identity_pk.data(), p.identity_pk.size());
     }
-    else
+    else [[unlikely]]
     {
         dev_println(
             "[" + std::to_string(ms) +
@@ -628,7 +698,7 @@ void handle_chat(const Parsed &p)
     }
 
     const auto it = peers.find(peer_key);
-    if (it == peers.end())
+    if (it == peers.end()) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: peer not found for key " + peer_key);
@@ -637,27 +707,27 @@ void handle_chat(const Parsed &p)
 
     PeerInfo &pi = it->second;
 
-    if (!pi.ready)
+    if (!pi.ready) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) + "] REJECTED: peer " + peer_from +
                     " not ready");
         return;
     }
 
-    if (!check_rate_limit(pi))
+    if (!check_rate_limit(pi)) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: rate limit exceeded for " + peer_from);
         return;
     }
 
-    if (pi.last_recv_time > 0 && (ms - pi.last_recv_time) > MESSAGE_TIMEOUT_MS)
+    if (pi.last_recv_time > 0 && (ms - pi.last_recv_time) > MESSAGE_TIMEOUT_MS) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] WARNING: large time gap from " + peer_from);
     }
 
-    if (p.seq < pi.recv_seq)
+    if (p.seq < pi.recv_seq) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: replay attack from " + peer_from +
@@ -666,7 +736,7 @@ void handle_chat(const Parsed &p)
         return;
     }
 
-    if (p.seq - pi.recv_seq > MAX_SEQ_GAP + SEQ_JITTER_BUFFER)
+    if (p.seq - pi.recv_seq > MAX_SEQ_GAP + SEQ_JITTER_BUFFER) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: seq gap too large from " + peer_from +
@@ -675,7 +745,10 @@ void handle_chat(const Parsed &p)
         return;
     }
 
-    if (p.seq > pi.recv_seq && p.seq - pi.recv_seq <= SEQ_JITTER_BUFFER)
+    const bool jitter_detected = p.seq > pi.recv_seq && p.seq - pi.recv_seq <= SEQ_JITTER_BUFFER;
+    const bool seq_mismatch = p.seq != pi.recv_seq;
+
+    if (jitter_detected) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] WARNING: jitter detected from " + peer_from +
@@ -684,7 +757,7 @@ void handle_chat(const Parsed &p)
 
         pi.recv_seq = p.seq;
     }
-    else if (p.seq != pi.recv_seq)
+    else if (seq_mismatch) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: seq mismatch from=" + peer_from +
@@ -703,13 +776,12 @@ void handle_chat(const Parsed &p)
             sender_fp_hex = fingerprint_to_hex(fp);
         }
 
-        std::vector<unsigned char> aad;
         const std::string aad_s =
             pi.peer_fp_hex + "|" + my_fp_hex + "|" + std::to_string(p.seq);
-        aad.assign(aad_s.begin(), aad_s.end());
+        std::vector<unsigned char> aad(aad_s.begin(), aad_s.end());
 
         const auto pt = aead_decrypt(pi.sk.key, p.ciphertext, aad, p.nonce);
-        if (pt.empty() || pt.size() > 65535)
+        if (pt.empty() || pt.size() > 65535) [[unlikely]]
         {
             dev_println("[" + std::to_string(ms) +
                         "] REJECTED: invalid plaintext size from " + peer_from);
@@ -719,24 +791,17 @@ void handle_chat(const Parsed &p)
         const std::string msg(pt.begin(), pt.end());
         const std::string ts = format_hhmmss(ms);
 
-        if (peer_from == my_username)
+        if (peer_from == my_username) [[unlikely]]
         {
             std::cout << "[" << ts << "] [sent] " << msg << "\n";
         }
-        else
+        else [[likely]]
         {
-            std::string shortfp = "(no fp)";
-            if (!sender_fp_hex.empty())
-            {
-                if (sender_fp_hex.size() > 10)
-                {
-                    shortfp = sender_fp_hex.substr(0, 10);
-                }
-                else
-                {
-                    shortfp = sender_fp_hex;
-                }
-            }
+            const std::string shortfp = 
+                sender_fp_hex.empty() ? "(no fp)" :
+                sender_fp_hex.size() > 10 ? sender_fp_hex.substr(0, 10) :
+                sender_fp_hex;
+
             std::cout << "[" << ts << "] [" << peer_from << " " << shortfp
                       << "] " << msg << "\n";
         }
@@ -750,6 +815,12 @@ void handle_chat(const Parsed &p)
                   << " seq=" << p.seq << " error=" << e.what() << "\n";
     }
 }
+
+
+
+
+
+
 
 void reader_thread(int sock)
 {
@@ -871,13 +942,23 @@ void reader_thread(int sock)
 void writer_thread(int sock)
 {
     std::string line;
-    while (std::getline(std::cin, line) && is_connected)
+while (std::getline(std::cin, line) && is_connected)
+{
+    if (line == "help")
     {
-        if (line == "q")
-        {
-            should_reconnect = false;
-            break;
-        }
+        std::cout <<
+            "q                         quit\n"
+            "list | list users         list connected users\n"
+            "pubk <username>           fetch user public key\n"
+            "<fp[,fp...]> <message>    send message to peer(s)\n";
+        continue;
+    }
+
+    if (line == "q")
+    {
+        should_reconnect = false;
+        break;
+    }
 
         if (line == "list" || line == "list users" || line == "list user")
     {
@@ -1086,11 +1167,18 @@ try
     const std::span args(argv, static_cast<std::size_t>(argc));
     
     if (args.size() < 5)
-    {
-        std::cout << "Usage: chat_client <server_ip> <server_port> <username> "
-                     "<private_key_path> [--sessionid <id>] [--debug]\n";
-        return 1;
-    }
+if (args.size() < 5)
+{
+    std::cout <<
+        "Usage: chat_client <server_ip> <server_port> <username> "
+        "<private_key_path> [--sessionid <id>] [--debug]\n\n"
+        "Runtime commands:\n"
+        "q                         quit\n"
+        "list | list users         list connected users\n"
+        "pubk <username>           fetch user public key\n"
+        "<fp[,fp...]> <message>    send message to peer(s)\n";
+    return 1;
+}
 
     for (std::size_t i = 1; i < args.size(); ++i)
     {

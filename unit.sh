@@ -6,31 +6,32 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/bash/shared/default.sh"
 
-BIN_DIR="bin"
+BIN_DIR="$SCRIPT_DIR/bin"
 SERVER_BIN="$BIN_DIR/server"
 CLIENT_BIN="$BIN_DIR/client"
 
 IP="127.0.0.1"
-PORT=1566
+PORT="1566"
 
 SESSION_ID="nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK"
 
-KEY_RON="sample/sample_test_key//output.sk"
-KEY_BETH="sample/sample_test_key//output1.sk"
-KEY_BOB="sample/sample_test_key//output2.sk"
+KEY_RON="$SCRIPT_DIR/sample/sample_test_key/ron.sk"
+KEY_BETH="$SCRIPT_DIR/sample/sample_test_key/beth.sk"
+KEY_BOB="$SCRIPT_DIR/sample/sample_test_key/bob.sk"
 
-
+# !important DO NOT CHANGE!
 FP_BETH_FROM_RON=""
 FP_RON_FROM_BETH=""
 FP_BOB_FROM_RON=""
 FP_BOB_FROM_BETH=""
 FP_RON_FROM_BOB=""
 FP_BETH_FROM_BOB=""
+#
 
 TMUX_SESSION="sprk_test_$$"
 
-
-DELAY_SERVER_START="0.3"
+# ERROR PRONE IF SHORT
+DELAY_SERVER_START="1"
 DELAY_SERVER_SHUTDOWN="0.3"
 DELAY_USER_CONNECT_INIT="0.3"
 DELAY_USER_CONNECT_EST="0.3"
@@ -43,7 +44,7 @@ DELAY_USER_QUIT="0.3"
 DELAY_TMUX_SHUTDOWN="0.3"
 
 PASSED_CHECKS=()
-HAS_FAILED=false
+HAS_FAILED="false"
 FAILED_DESC=""
 FAILED_PATTERN=""
 FAILED_OUTPUT=""
@@ -214,7 +215,7 @@ Test_001_Client_help() {
 
 EXEC_002_Start_server() {
     printf "%s%s%s\n" "${BOLD}${WHITE}" "EXEC 002: Start Server" "${RESET}" >&2
-    tmux new-session -d -s "$TMUX_SESSION"
+    tmux new-session -d -s "$TMUX_SESSION" -c "$SCRIPT_DIR"
     tmux rename-window -t "$TMUX_SESSION:0" server
     send_cmd server "$SERVER_BIN $PORT" "(start server)"
     sleep $DELAY_SERVER_START
@@ -240,8 +241,8 @@ Test_004_Beth_connect() {
     send_cmd beth "$CLIENT_BIN $IP $PORT beth $KEY_BETH --sessionid $SESSION_ID" "(beth login)"
     sleep $DELAY_USER_CONNECT_INIT
     check_output beth "connected" "Beth connected"
-    check_output beth "connect ron pubkey=.*" "Beth sees ron" 35
-    check_output beth "peer ron ready" "Beth ready with ron" 35
+    check_output beth "connect ron pubkey=.*" "Beth sees ron" 10
+    check_output beth "peer ron ready" "Beth ready with ron" 10
     sleep $DELAY_USER_CONNECT_EST
     check_output server "connect beth session=.*" "Server sees beth"
 }

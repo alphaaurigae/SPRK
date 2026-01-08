@@ -6,7 +6,7 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/bash/shared/default.sh"
 
-BIN_DIR="/home/mmmm/Desktop/SPRK/bin"
+BIN_DIR="bin"
 SERVER_BIN="$BIN_DIR/server"
 CLIENT_BIN="$BIN_DIR/client"
 
@@ -15,9 +15,9 @@ PORT=1566
 
 SESSION_ID="nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK"
 
-KEY_RON="/home/mmmm/Desktop/ssh/output.sk"
-KEY_BETH="/home/mmmm/Desktop/ssh/output1.sk"
-KEY_BOB="/home/mmmm/Desktop/ssh/output2.sk"
+KEY_RON="sample/sample_test_key//output.sk"
+KEY_BETH="sample/sample_test_key//output1.sk"
+KEY_BOB="sample/sample_test_key//output2.sk"
 
 
 FP_BETH_FROM_RON=""

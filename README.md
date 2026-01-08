@@ -177,3 +177,228 @@ $ /home/mmmm/Desktop/SPRK_dev/bin/client 127.0.0.1 1566  bob /home/mmmm/Desktop/
 [01:18:03] [beth 7556c04652] "back"
 
 ```
+
+### Unit ./unit.sh
+
+```
+✔ ~/Desktop/SPRK [main ↑·1|✚ 2…2] 
+03:03 $ '/home/mmmm/Desktop/SPRK/unit.sh' 
+=== STARTING FULL SPRK TEST SUITE ===
+RUNNING: Test_001_Client_help
+Test 001: Client help
+SUCCESS: Help complete
+RUNNING: EXEC_002_Start_server
+EXEC 002: Start Server
+STATUS: >>> Sending to server: 'bin/server 1566' (start server)
+Connection to 127.0.0.1 1566 port [tcp/*] succeeded!
+SUCCESS: Server listening
+RUNNING: Test_003_Ron_connect
+Test 003: Ron connects
+STATUS: >>> Sending to ron: 'bin/client 127.0.0.1 1566 ron sample/sample_test_key//output.sk --sessionid nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK' (ron login)
+DEBUG: check_output target=ron pattern=connected timeout=2 grace=3
+PASS: Ron connected
+DEBUG: check_output target=server pattern=connect ron session=.* timeout=2 grace=3
+PASS: Server sees ron
+RUNNING: Test_004_Beth_connect
+Test 004: Beth connects
+STATUS: >>> Sending to beth: 'bin/client 127.0.0.1 1566 beth sample/sample_test_key//output1.sk --sessionid nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK' (beth login)
+DEBUG: check_output target=beth pattern=connected timeout=2 grace=3
+PASS: Beth connected
+DEBUG: check_output target=beth pattern=connect ron pubkey=.* timeout=35 grace=3
+PASS: Beth sees ron
+DEBUG: check_output target=beth pattern=peer ron ready timeout=35 grace=3
+PASS: Beth ready with ron
+DEBUG: check_output target=server pattern=connect beth session=.* timeout=2 grace=3
+PASS: Server sees beth
+RUNNING: Test_005_Ron_Beth_messaging_and_fp_extraction
+Test 005: Ron ↔ Beth messaging + extract FPs
+STATUS: Extracting FPs from ron (after Ron+Beth connected)
+STATUS: >>> Sending to ron: 'list users' (extract FPs)
+Updated FPs after ron list
+FP_BETH_FROM_RON = 7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a
+FP_RON_FROM_BETH = 
+FP_BOB_FROM_RON  = 
+FP_BOB_FROM_BETH = 
+FP_RON_FROM_BOB  = 
+FP_BETH_FROM_BOB = 
+STATUS: Extracting FPs from beth (from Beth's view)
+STATUS: >>> Sending to beth: 'list users' (extract FPs)
+Updated FPs after beth list
+FP_BETH_FROM_RON = 7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a
+FP_RON_FROM_BETH = 5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58
+FP_BOB_FROM_RON  = 
+FP_BOB_FROM_BETH = 
+FP_RON_FROM_BOB  = 
+FP_BETH_FROM_BOB = 
+STATUS: >>> Sending to ron: '7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a hello beth from ron' (ron→beth)
+DEBUG: check_output target=beth pattern=\[.*\] \[ron .*] hello beth from ron timeout=2 grace=3
+PASS: Beth received from ron
+STATUS: >>> Sending to beth: '5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58 hello ron from beth' (beth→ron)
+DEBUG: check_output target=ron pattern=\[.*\] \[beth .*] hello ron from beth timeout=2 grace=3
+PASS: Ron received from beth
+RUNNING: Test_006_Bob_connect
+Test 006: Bob connects + triangular rekey
+STATUS: >>> Sending to bob: 'bin/client 127.0.0.1 1566 bob sample/sample_test_key//output2.sk --sessionid nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK' (bob login)
+DEBUG: check_output target=bob pattern=connected timeout=2 grace=3
+PASS: Bob connected
+DEBUG: check_output target=bob pattern=connect ron pubkey=.* timeout=45 grace=3
+PASS: Bob sees ron
+DEBUG: check_output target=bob pattern=connect beth pubkey=.* timeout=45 grace=3
+PASS: Bob sees beth
+DEBUG: check_output target=bob pattern=peer ron ready timeout=45 grace=3
+PASS: Bob ready with ron
+DEBUG: check_output target=bob pattern=peer beth ready timeout=45 grace=3
+PASS: Bob ready with beth
+DEBUG: check_output target=server pattern=connect bob session=.* timeout=2 grace=3
+PASS: Server sees bob
+RUNNING: Test_007_Extract_all_fps_after_bob
+Test 007: Extract all fingerprints after Bob joined
+STATUS: Extracting FPs from ron (from Ron)
+STATUS: >>> Sending to ron: 'list users' (extract FPs)
+Updated FPs after ron list
+FP_BETH_FROM_RON = 7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a
+FP_RON_FROM_BETH = 5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58
+FP_BOB_FROM_RON  = 87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099
+FP_BOB_FROM_BETH = 
+FP_RON_FROM_BOB  = 
+FP_BETH_FROM_BOB = 
+STATUS: Extracting FPs from beth (from Beth)
+STATUS: >>> Sending to beth: 'list users' (extract FPs)
+Updated FPs after beth list
+FP_BETH_FROM_RON = 7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a
+FP_RON_FROM_BETH = 5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58
+FP_BOB_FROM_RON  = 87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099
+FP_BOB_FROM_BETH = 87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099
+FP_RON_FROM_BOB  = 
+FP_BETH_FROM_BOB = 
+STATUS: Extracting FPs from bob (from Bob)
+STATUS: >>> Sending to bob: 'list users' (extract FPs)
+Updated FPs after bob list
+FP_BETH_FROM_RON = 7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a
+FP_RON_FROM_BETH = 5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58
+FP_BOB_FROM_RON  = 87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099
+FP_BOB_FROM_BETH = 87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099
+FP_RON_FROM_BOB  = 5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58
+FP_BETH_FROM_BOB = 7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a
+RUNNING: Test_008_Triangular_messaging
+Test 008: Full triangular messaging
+STATUS: >>> Sending to ron: '87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099 hi bob from ron' (ron→bob)
+DEBUG: check_output target=bob pattern=\[.*\] \[ron .*] hi bob from ron timeout=2 grace=3
+PASS: Bob got from ron
+STATUS: >>> Sending to beth: '87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099 hi bob from beth' (beth→bob)
+DEBUG: check_output target=bob pattern=\[.*\] \[beth .*] hi bob from beth timeout=2 grace=3
+PASS: Bob got from beth
+STATUS: >>> Sending to bob: '5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58 hi ron from bob' (bob→ron)
+DEBUG: check_output target=ron pattern=\[.*\] \[bob .*] hi ron from bob timeout=2 grace=3
+PASS: Ron got from bob
+STATUS: >>> Sending to bob: '7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a hi beth from bob' (bob→beth)
+DEBUG: check_output target=beth pattern=\[.*\] \[bob .*] hi beth from bob timeout=2 grace=3
+PASS: Beth got from bob
+RUNNING: Test_009_Multi_recipient
+Test 009: Multi-recipient messaging
+STATUS: >>> Sending to ron: '7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a,87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099 group hello from ron' (group)
+DEBUG: check_output target=beth pattern=\[.*\] \[ron .*] group hello from ron timeout=2 grace=3
+PASS: Beth got group
+DEBUG: check_output target=bob pattern=\[.*\] \[ron .*] group hello from ron timeout=2 grace=3
+PASS: Bob got group
+RUNNING: Test_010_Client_commands
+Test 010: Client commands
+STATUS: >>> Sending to ron: 'pubk beth' (pubk beth)
+DEBUG: check_output target=ron pattern=pubkey beth timeout=5 grace=3
+PASS: Ron fetched beth pubkey
+STATUS: >>> Sending to ron: 'pubk bob' (pubk bob)
+DEBUG: check_output target=ron pattern=pubkey bob timeout=5 grace=3
+PASS: Ron fetched bob pubkey
+STATUS: >>> Sending to beth: 'pubk ron' (pubk ron)
+DEBUG: check_output target=beth pattern=pubkey ron timeout=5 grace=3
+PASS: Beth fetched ron pubkey
+STATUS: >>> Sending to beth: 'pubk bob' (pubk bob)
+DEBUG: check_output target=beth pattern=pubkey bob timeout=5 grace=3
+PASS: Beth fetched bob pubkey
+STATUS: >>> Sending to bob: 'pubk ron' (pubk ron)
+DEBUG: check_output target=bob pattern=pubkey ron timeout=5 grace=3
+PASS: Bob fetched ron pubkey
+STATUS: >>> Sending to bob: 'pubk beth' (pubk beth)
+DEBUG: check_output target=bob pattern=pubkey beth timeout=5 grace=3
+PASS: Bob fetched beth pubkey
+RUNNING: Test_011_Post_Ron_reconnect_full_verification
+Test 011: Full verification after Ron reconnect
+STATUS: >>> Sending to ron: 'q' (quit ron)
+STATUS: >>> Sending to ron: 'bin/client 127.0.0.1 1566 ron sample/sample_test_key//output.sk --sessionid nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK' (ron relogin)
+DEBUG: check_output target=ron pattern=connected timeout=2 grace=3
+PASS: Ron reconnected
+DEBUG: check_output target=ron pattern=peer beth ready timeout=45 grace=3
+PASS: Ron ready with beth (post-reconnect)
+DEBUG: check_output target=ron pattern=peer bob ready timeout=45 grace=3
+PASS: Ron ready with bob (post-reconnect)
+STATUS: Extracting FPs from ron (post-reconnect)
+STATUS: >>> Sending to ron: 'list users' (extract FPs)
+Updated FPs after ron list
+FP_BETH_FROM_RON = 7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a
+FP_RON_FROM_BETH = 5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58
+FP_BOB_FROM_RON  = 87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099
+FP_BOB_FROM_BETH = 87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099
+FP_RON_FROM_BOB  = 5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58
+FP_BETH_FROM_BOB = 7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a
+STATUS: >>> Sending to ron: '87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099 post-reconnect hi bob from ron' (post-reconnect ron→bob)
+DEBUG: check_output target=bob pattern=\[.*\] \[ron .*] post-reconnect hi bob from ron timeout=2 grace=3
+PASS: Bob got post-reconnect
+STATUS: >>> Sending to beth: '87fab05a438a721b73233df03cb60655319456b57241e3c481ba489ceed28099 post-reconnect hi bob from beth' (post-reconnect beth→bob)
+DEBUG: check_output target=bob pattern=\[.*\] \[beth .*] post-reconnect hi bob from beth timeout=2 grace=3
+PASS: Bob got post-reconnect from beth
+STATUS: >>> Sending to bob: '5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58 post-reconnect hi ron from bob' (post-reconnect bob→ron)
+DEBUG: check_output target=ron pattern=\[.*\] \[bob .*] post-reconnect hi ron from bob timeout=2 grace=3
+PASS: Ron got post-reconnect from bob
+STATUS: >>> Sending to ron: 'list users' (post-reconnect list)
+DEBUG: check_output target=ron pattern=beth.*\[.*\] timeout=2 grace=3
+PASS: List shows beth (post-reconnect)
+DEBUG: check_output target=ron pattern=bob.*\[.*\] timeout=2 grace=3
+PASS: List shows bob (post-reconnect)
+
+════════════════════════════════════════════════════════
+                ALL TESTS COMPLETED - PASS            
+  ════════════════════════════════════════════════════════
+   ✓ Ron connected
+   ✓ Server sees ron
+   ✓ Beth connected
+   ✓ Beth sees ron
+   ✓ Beth ready with ron
+   ✓ Server sees beth
+   ✓ Beth received from ron
+   ✓ Ron received from beth
+   ✓ Bob connected
+   ✓ Bob sees ron
+   ✓ Bob sees beth
+   ✓ Bob ready with ron
+   ✓ Bob ready with beth
+   ✓ Server sees bob
+   ✓ Bob got from ron
+   ✓ Bob got from beth
+   ✓ Ron got from bob
+   ✓ Beth got from bob
+   ✓ Beth got group
+   ✓ Bob got group
+   ✓ Ron fetched beth pubkey
+   ✓ Ron fetched bob pubkey
+   ✓ Beth fetched ron pubkey
+   ✓ Beth fetched bob pubkey
+   ✓ Bob fetched ron pubkey
+   ✓ Bob fetched beth pubkey
+   ✓ Ron reconnected
+   ✓ Ron ready with beth (post-reconnect)
+   ✓ Ron ready with bob (post-reconnect)
+   ✓ Bob got post-reconnect
+   ✓ Bob got post-reconnect from beth
+   ✓ Ron got post-reconnect from bob
+   ✓ List shows beth (post-reconnect)
+   ✓ List shows bob (post-reconnect)
+
+═══════════════════════════════════════════════════════════════════════════
+Total successful checks: 34
+═══════════════════════════════════════════════════════════════════════════
+=== CLEANUP STARTED ===
+=== CLEANUP DONE ===
+✔ ~/Desktop/SPRK [main ↑·1|✚ 2…2] 
+ 
+
+```

@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <ranges>
 
 int make_listen(int port)
 {
@@ -135,8 +136,11 @@ struct SessionData
 
 static int lcs_len(const std::string &a, const std::string &b)
 {
-    size_t           n = a.size(), m = b.size();
-    std::vector<int> prev(m + 1, 0), cur(m + 1, 0);
+    size_t n = a.size();
+    size_t m = b.size();
+    std::vector<int> prev(m + 1, 0);
+    std::vector<int> cur(m + 1, 0);
+
     for (size_t i = 1; i <= n; ++i)
     {
         for (size_t j = 1; j <= m; ++j)
@@ -155,37 +159,31 @@ static int lcs_len(const std::string &a, const std::string &b)
 static bool too_similar_username(const std::string &u,
                                  const std::unordered_map<std::string, int> &existing)
 {
-    for (const auto &kv : existing)
-    {
-        const std::string &e      = kv.first;
-        int                l      = lcs_len(u, e);
-        int                maxlen = std::max(u.size(), e.size());
-        if (maxlen > 0 && (100 * l) >= (85 * maxlen))
-            return true;
-    }
-    return false;
+    return std::ranges::any_of(existing, [&u](const auto& kv) {
+        const std::string& e = kv.first;
+        int l = lcs_len(u, e);
+        size_t maxlen = std::max(u.size(), e.size());
+        return maxlen > 0 && (100 * l) >= (85 * static_cast<int>(maxlen));
+    });
 }
 
 inline bool recv_full_frame(int fd, std::vector<unsigned char>& frame)
 {
-    unsigned char lenbuf[4];
-    ssize_t n = recv(fd, lenbuf, 4, MSG_PEEK);
-    if (n < 4) {
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-            return true;
-        return false;
+    std::array<unsigned char, 4> lenbuf{};
+    ssize_t n = recv(fd, lenbuf.data(), lenbuf.size(), MSG_PEEK);
+
+    if (n < static_cast<ssize_t>(lenbuf.size())) {
+        return (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+        // Returns true only on EAGAIN/EWOULDBLOCK, false on partial header or real error
     }
 
-    uint32_t len = read_u32_be(lenbuf);
-    if (len > 64 * 1024)
+    uint32_t payload_len = read_u32_be(lenbuf.data());
+    if (payload_len > 64 * 1024)
         return false;
 
-    frame.resize(4 + len);
-    ssize_t got = full_recv(fd, frame.data(), 4 + len);
-    if (got <= 0)
-        return false;
-
-    return true;
+    frame.resize(4 + payload_len);
+    ssize_t got = full_recv(fd, frame.data(), frame.size());
+    return got > 0;
 }
 
 inline void cleanup_disconnected_client(
@@ -243,6 +241,150 @@ inline void cleanup_disconnected_client(
     clients.erase(std::remove(clients.begin(), clients.end(), c), clients.end());
 }
 
+
+
+
+
+
+// Returns empty string on success, error message on failure
+static std::string validate_hello_basics(const Parsed& p, std::string& uname, std::string& sid)
+{
+    uname = trim(p.username);
+    sid   = trim(p.session_id);
+
+    if (sid.empty()) {
+        sid = std::string(reinterpret_cast<const char*>(p.eph_pk.data()),
+                          p.eph_pk.size());
+    }
+
+    if (p.id_alg == 0 || p.identity_pk.empty() || p.signature.empty()) {
+        return "missing identity or signature";
+    }
+
+    std::vector<unsigned char> sig_data;
+    sig_data.reserve(p.eph_pk.size() + p.session_id.size());
+    sig_data.insert(sig_data.end(), p.eph_pk.begin(), p.eph_pk.end());
+    sig_data.insert(sig_data.end(), p.session_id.begin(), p.session_id.end());
+
+    bool sig_ok = (p.id_alg == ALGO_MLDSA87) &&
+                  pqsig_verify("ML-DSA-87", p.identity_pk, sig_data, p.signature);
+
+    if (!sig_ok) {
+        return "invalid signature";
+    }
+
+    return {}; // empty string = success
+}
+
+
+
+
+
+
+static void cleanup_old_nickname(SessionData& sd, int client_fd, const std::string& new_uname)
+{
+    auto it_oldnick = sd.nick_by_fd.find(client_fd);
+    if (it_oldnick == sd.nick_by_fd.end() || it_oldnick->second == new_uname) {
+        return; // no cleanup needed
+    }
+
+    const std::string oldnick = it_oldnick->second;
+    sd.fd_by_nick.erase(oldnick);
+
+    auto it_fp = sd.fingerprint_hex_by_fd.find(client_fd);
+    if (it_fp != sd.fingerprint_hex_by_fd.end()) {
+        const std::string oldfp = it_fp->second;
+
+        sd.fd_by_fingerprint.erase(oldfp);
+        sd.nick_by_fingerprint.erase(oldfp);
+        sd.eph_by_fingerprint.erase(oldfp);
+        sd.identity_pk_by_fingerprint.erase(oldfp);
+        sd.hello_message_by_fingerprint.erase(oldfp);
+        sd.fingerprint_hex_by_fd.erase(client_fd);
+    }
+
+    sd.nick_by_fd.erase(client_fd);
+}
+
+
+
+
+
+static bool check_username_conflicts(SessionData& sd, 
+                                     const std::string& uname, 
+                                     int client_fd,
+                                     std::vector<int>& to_remove)
+{
+    auto it_existing = sd.fd_by_nick.find(uname);
+
+    // Exact match with different fd → reject
+    if (it_existing != sd.fd_by_nick.end() && it_existing->second != client_fd) {
+        std::cout << "REJECTED: username already in use " << uname << "\n";
+        to_remove.push_back(client_fd);
+        return false;
+    }
+
+    // Similar username, but not the same client re-connecting
+    if (too_similar_username(uname, sd.fd_by_nick) &&
+        (it_existing == sd.fd_by_nick.end() || it_existing->second != client_fd)) {
+        std::cout << "REJECTED: username too similar to existing user " << uname << "\n";
+        to_remove.push_back(client_fd);
+        return false;
+    }
+
+    return true; // username is acceptable
+}
+
+
+
+
+
+static void register_client(SessionData& sd,
+                            int client_fd,
+                            const std::string& uname,
+                            const Parsed& p,
+                            const std::vector<unsigned char>& frame)
+{
+    // Compute fingerprint if identity key present
+    std::string fp_hex;
+    if (!p.identity_pk.empty()) {
+        auto fp_arr = fingerprint_sha256(p.identity_pk);
+        fp_hex = fingerprint_to_hex(fp_arr);
+    }
+
+    // Always register nickname
+    sd.nick_by_fd[client_fd] = uname;
+    sd.fd_by_nick[uname] = client_fd;
+
+    // Register identity/fingerprint data if present
+    if (!fp_hex.empty()) {
+        sd.fingerprint_hex_by_fd[client_fd] = fp_hex;
+        sd.fd_by_fingerprint[fp_hex] = client_fd;
+        sd.nick_by_fingerprint[fp_hex] = uname;
+        sd.eph_by_fingerprint[fp_hex] = p.eph_pk;
+        sd.identity_pk_by_fingerprint[fp_hex] = p.identity_pk;
+        sd.hello_message_by_fingerprint[fp_hex] = frame;
+    } else {
+        sd.hello_message_by_fingerprint[""] = frame;
+    }
+}
+
+
+
+static void broadcast_hello_to_peers(const SessionData& sd,
+                                    int client_fd,
+                                    const std::vector<unsigned char>& frame)
+{
+    for (const auto& kv : sd.fd_by_nick) {
+        int fd = kv.second;
+        if (fd == client_fd) continue;
+        full_send(fd, frame.data(), frame.size());
+    }
+}
+
+
+
+
 inline bool handle_hello_message(
     int client_fd,
     const Parsed& p,
@@ -251,135 +393,40 @@ inline bool handle_hello_message(
     std::unordered_map<int, std::string>& session_by_fd,
     std::vector<int>& to_remove)
 {
-    std::string uname = trim(p.username);
-    std::string sid   = trim(p.session_id);
-    if (sid.empty())
-    {
-        sid = std::string(reinterpret_cast<const char *>(p.eph_pk.data()),
-                          p.eph_pk.size());
-    }
+    std::string uname;
+    std::string sid;
+    std::string error = validate_hello_basics(p, uname, sid);
 
-    if (p.id_alg == 0 || p.identity_pk.empty() || p.signature.empty())
-    {
-        std::cout << "REJECTED: missing identity or signature for " << uname << "\n";
+    if (!error.empty()) {
+        std::cout << "REJECTED: " << error << " for " << uname << "\n";
         to_remove.push_back(client_fd);
         return false;
     }
 
-    std::vector<unsigned char> sig_data;
-    sig_data.reserve(p.eph_pk.size() + p.session_id.size());
-    sig_data.insert(sig_data.end(), p.eph_pk.begin(), p.eph_pk.end());
-    sig_data.insert(sig_data.end(), p.session_id.begin(), p.session_id.end());
+    SessionData& sd = sessions[sid];
 
-    bool sig_ok = false;
-    if (p.id_alg == ALGO_MLDSA87)
-    {
-        sig_ok = pqsig_verify("ML-DSA-87", p.identity_pk, sig_data, p.signature);
-    }
-    else
-    {
-        sig_ok = false;
-    }
-
-    if (!sig_ok)
-    {
-        std::cout << "REJECTED: invalid signature for " << uname << "\n";
-        to_remove.push_back(client_fd);
+    if (!check_username_conflicts(sd, uname, client_fd, to_remove)) {
         return false;
     }
 
-    if (sessions.find(sid) == sessions.end())
-    {
-        sessions[sid] = SessionData{};
-    }
-    SessionData &sd = sessions[sid];
+    cleanup_old_nickname(sd, client_fd, uname);
+    register_client(sd, client_fd, uname, p, frame);
 
-    auto it_existing = sd.fd_by_nick.find(uname);
-    if (it_existing != sd.fd_by_nick.end() && it_existing->second != client_fd)
-    {
-        std::cout << "REJECTED: username already in use " << uname << "\n";
-        to_remove.push_back(client_fd);
-        return false;
-    }
-
-    if (too_similar_username(uname, sd.fd_by_nick) &&
-        (it_existing == sd.fd_by_nick.end() || it_existing->second != client_fd))
-    {
-        std::cout << "REJECTED: username too similar to existing user " << uname << "\n";
-        to_remove.push_back(client_fd);
-        return false;
-    }
-
-    auto it_oldnick = sd.nick_by_fd.find(client_fd);
-    if (it_oldnick != sd.nick_by_fd.end() && it_oldnick->second != uname)
-    {
-        std::string oldnick = it_oldnick->second;
-        sd.fd_by_nick.erase(oldnick);
-        auto it_fp_existing = sd.fingerprint_hex_by_fd.find(client_fd);
-        if (it_fp_existing != sd.fingerprint_hex_by_fd.end())
-        {
-            std::string oldfp = it_fp_existing->second;
-            sd.fd_by_fingerprint.erase(oldfp);
-            sd.nick_by_fingerprint.erase(oldfp);
-            sd.eph_by_fingerprint.erase(oldfp);
-            sd.identity_pk_by_fingerprint.erase(oldfp);
-            sd.hello_message_by_fingerprint.erase(oldfp);
-            sd.fingerprint_hex_by_fd.erase(it_fp_existing);
-        }
-        sd.nick_by_fd.erase(it_oldnick);
-    }
-
-    std::string fp_hex;
-    if (!p.identity_pk.empty())
-    {
-        auto fp_arr = fingerprint_sha256(p.identity_pk);
-        fp_hex      = fingerprint_to_hex(fp_arr);
-    }
-    else
-    {
-        fp_hex.clear();
-    }
-
-    sd.nick_by_fd[client_fd]     = uname;
-    sd.fd_by_nick[uname] = client_fd;
-    if (!fp_hex.empty())
-    {
-        sd.fingerprint_hex_by_fd[client_fd]           = fp_hex;
-        sd.fd_by_fingerprint[fp_hex]          = client_fd;
-        sd.nick_by_fingerprint[fp_hex]        = uname;
-        sd.eph_by_fingerprint[fp_hex]         = p.eph_pk;
-        sd.identity_pk_by_fingerprint[fp_hex] = p.identity_pk;
-        sd.hello_message_by_fingerprint[fp_hex] =
-            std::vector<unsigned char>(frame.begin(), frame.end());
-    }
-    else
-    {
-        sd.hello_message_by_fingerprint[""] =
-            std::vector<unsigned char>(frame.begin(), frame.end());
-    }
     session_by_fd[client_fd] = sid;
     std::cout << "connect " << uname << " session=" << sid << "\n";
 
-    for (auto &kv : sd.fd_by_nick)
-    {
-        int fd = kv.second;
-        if (fd == client_fd)
-            continue;
-        full_send(fd, frame.data(), frame.size());
-    }
+    broadcast_hello_to_peers(sd, client_fd, frame);
 
-    for (auto &kv : sd.hello_message_by_fingerprint)
-    {
-        const std::string &existing_fp = kv.first;
-        if (!existing_fp.empty())
-        {
+    // Send existing hellos to new client (core protocol handshake — keep visible)
+    for (const auto& kv : sd.hello_message_by_fingerprint) {
+        const std::string& existing_fp = kv.first;
+        if (!existing_fp.empty()) {
             auto itn = sd.nick_by_fingerprint.find(existing_fp);
             if (itn != sd.nick_by_fingerprint.end() && itn->second == uname)
                 continue;
         }
-        auto &existing_hello = kv.second;
-        try
-        {
+        const auto& existing_hello = kv.second;
+        try {
             uint32_t existing_payload_len = read_u32_be(existing_hello.data());
             Parsed p2 = parse_payload(existing_hello.data() + 4, existing_payload_len);
             std::vector<unsigned char> empty_encaps;
@@ -388,15 +435,20 @@ inline bool handle_hello_message(
                 p2.id_alg, p2.identity_pk, p2.signature,
                 empty_encaps, p2.session_id);
             full_send(client_fd, stripped.data(), stripped.size());
-        }
-        catch (...)
-        {
+        } catch (...) {
             full_send(client_fd, existing_hello.data(), existing_hello.size());
         }
     }
 
     return true;
 }
+
+
+
+
+
+
+
 
 inline void handle_chat_message(
     int client_fd,
@@ -406,62 +458,46 @@ inline void handle_chat_message(
     std::unordered_map<std::string, SessionData>& sessions)
 {
     auto sid_it = session_by_fd.find(client_fd);
-    if (sid_it == session_by_fd.end())
-        return;
+    if (sid_it == session_by_fd.end()) return;
 
-    const std::string& sid = sid_it->second;
-    auto session_it = sessions.find(sid);
-    if (session_it == sessions.end())
-        return;
+    auto sess_it = sessions.find(sid_it->second);
+    if (sess_it == sessions.end()) return;
 
-    SessionData& sd = session_it->second;
+    SessionData& sd = sess_it->second;
+
     int dst = -1;
 
-    auto itn = sd.fd_by_nick.find(p.to);
-    if (itn != sd.fd_by_nick.end())
-    {
-        dst = itn->second;
+    // Fast path: exact nickname
+    if (auto it = sd.fd_by_nick.find(p.to); it != sd.fd_by_nick.end()) {
+        dst = it->second;
     }
-    else
-    {
+    // Slow path: only if needed
+    else if (p.to.size() >= 4) {
         std::string lower = p.to;
-        bool possible_hex = true;
-        for (char ch : lower) {
-            if (!isxdigit((unsigned char)ch)) {
-                possible_hex = false;
-                break;
-            }
-        }
-        if (possible_hex && lower.size() >= 4)
+        std::ranges::transform(lower, lower.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        if (auto it = std::ranges::find_if(sd.fd_by_fingerprint,
+            [&lower](const auto& kv) {
+                const std::string& fp = kv.first;
+                if (fp.size() < lower.size()) return false;
+                return std::ranges::equal(lower.begin(), lower.end(),
+                                          fp.begin(), fp.begin() + lower.size(),
+                                          [](unsigned char a, unsigned char b) {
+                                              return std::tolower(a) == std::tolower(b);
+                                          });
+            });
+            it != sd.fd_by_fingerprint.end())
         {
-            for (auto& kv : sd.fd_by_fingerprint)
-            {
-                const std::string& fp_hex = kv.first;
-                if (fp_hex.size() >= lower.size())
-                {
-                    bool match = true;
-                    for (size_t i = 0; i < lower.size(); ++i)
-                    {
-                        char a = std::tolower((unsigned char)fp_hex[i]);
-                        char b = std::tolower((unsigned char)lower[i]);
-                        if (a != b)
-                        {
-                            match = false;
-                            break;
-                        }
-                    }
-                    if (match)
-                    {
-                        dst = kv.second;
-                        break;
-                    }
-                }
-            }
+            dst = it->second;
         }
     }
-    if (dst != -1)
-        full_send(dst, frame.data(), frame.size());
+
+    // Branchless send
+    size_t size = static_cast<size_t>(dst != -1) * frame.size();
+    full_send(dst, frame.data(), size);
 }
+
 
 inline void handle_list_request(
     int client_fd,
@@ -549,102 +585,126 @@ inline void handle_pubkey_request(
     full_send(client_fd, resp.data(), resp.size());
 }
 
+static void prune_invalid_clients(std::vector<int>& clients)
+{
+    clients.erase(std::remove_if(clients.begin(), clients.end(),
+        [](int fd) {
+            if (fd >= FD_SETSIZE) {
+                close(fd);
+                return true;
+            }
+            return false;
+        }),
+        clients.end());
+}
+
+static int prepare_select(fd_set& rfds, int listen_fd, const std::vector<int>& clients)
+{
+    FD_ZERO(&rfds);
+    FD_SET(listen_fd, &rfds);
+    int maxfd = listen_fd;
+
+    for (int c : clients) {
+        FD_SET(c, &rfds);
+        if (c > maxfd) maxfd = c;
+    }
+
+    return maxfd;
+}
+
+static void process_client_events(
+    const fd_set& rfds,
+    const std::vector<int>& clients,
+    std::unordered_map<std::string, SessionData>& sessions,
+    std::unordered_map<int, std::string>& session_by_fd,
+    std::vector<int>& to_remove)
+{
+    for (int c : clients) {
+        if (!FD_ISSET(c, &rfds))
+            continue;
+
+        std::vector<unsigned char> frame;
+        if (!recv_full_frame(c, frame)) {
+            to_remove.push_back(c);
+            continue;
+        }
+
+        uint32_t payload_len = read_u32_be(frame.data());
+        try {
+            Parsed p = parse_payload(frame.data() + 4, payload_len);
+
+            switch (p.type) {
+                case MSG_HELLO:
+                    handle_hello_message(c, p, frame, sessions, session_by_fd, to_remove);
+                    break;
+                case MSG_CHAT:
+                    handle_chat_message(c, p, frame, session_by_fd, sessions);
+                    break;
+                case MSG_LIST_REQUEST:
+                    handle_list_request(c, session_by_fd, sessions);
+                    break;
+                case MSG_PUBKEY_REQUEST:
+                    handle_pubkey_request(c, p, session_by_fd, sessions);
+                    break;
+                default:
+                    break;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "server parse exception: " << e.what() << "\n";
+            to_remove.push_back(c);
+        } catch (...) {
+            std::cerr << "server parse exception: unknown\n";
+            to_remove.push_back(c);
+        }
+    }
+}
+
+
 int main(int argc, char **argv)
 {
-    if (argc < 2)
-    {
+    if (argc < 2) {
         std::cout << "Usage: chat_server <port>\n";
         return 1;
     }
-    int port      = std::stoi(argv[1]);
-    int listen_fd = make_listen(port);
-    set_nonblock(listen_fd);
-    std::vector<int>                             clients;
-    std::unordered_map<std::string, SessionData> sessions;
-    std::unordered_map<int, std::string>         session_by_fd;
 
-    while (true)
-    {
-        clients.erase(std::remove_if(clients.begin(), clients.end(),
-                                     [](int fd)
-                                     {
-                                         if (fd >= FD_SETSIZE)
-                                         {
-                                             close(fd);
-                                             return true;
-                                         }
-                                         return false;
-                                     }),
-                      clients.end());
+    int port = std::stoi(argv[1]);
+    int listen_fd = make_listen(port);
+    if (listen_fd < 0) return 1;
+
+    if (set_nonblock(listen_fd) < 0) {
+        close(listen_fd);
+        return 1;
+    }
+
+    std::vector<int> clients;
+    std::unordered_map<std::string, SessionData> sessions;
+    std::unordered_map<int, std::string> session_by_fd;
+
+    while (true) {
+        prune_invalid_clients(clients);
 
         fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(listen_fd, &rfds);
-        int maxfd = listen_fd;
-        for (int c : clients)
-        {
-            FD_SET(c, &rfds);
-            if (c > maxfd)
-                maxfd = c;
-        }
+        int maxfd = prepare_select(rfds, listen_fd, clients);
+
         timeval tv{0, 200000};
-        int     r = select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
-        if (r < 0)
-        {
+        int r = select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
+        if (r < 0) {
             perror("select");
             break;
         }
-        if (FD_ISSET(listen_fd, &rfds))
-        {
+
+        if (FD_ISSET(listen_fd, &rfds)) {
             accept_new_client(listen_fd, clients);
         }
+
         std::vector<int> to_remove;
-        for (int c : clients)
-        {
-            if (!FD_ISSET(c, &rfds))
-                continue;
+        process_client_events(rfds, clients, sessions, session_by_fd, to_remove);
 
-            std::vector<unsigned char> frame;
-            if (!recv_full_frame(c, frame)) {
-                to_remove.push_back(c);
-                continue;
-            }
-
-            uint32_t payload_len = read_u32_be(frame.data());
-            try
-            {
-                Parsed p = parse_payload(frame.data() + 4, payload_len);
-                if (p.type == MSG_HELLO)
-                {
-                    handle_hello_message(c, p, frame, sessions, session_by_fd, to_remove);
-                }
-                else if (p.type == MSG_CHAT)
-                {
-                    handle_chat_message(c, p, frame, session_by_fd, sessions);
-                }
-                else if (p.type == MSG_LIST_REQUEST)
-                {
-                    handle_list_request(c, session_by_fd, sessions);
-                }
-                else if (p.type == MSG_PUBKEY_REQUEST)
-                {
-                    handle_pubkey_request(c, p, session_by_fd, sessions);
-                }
-            }
-            catch (const std::exception &e)
-            {
-                std::cerr << "server parse exception: " << e.what() << "\n";
-            }
-            catch (...)
-            {
-                std::cerr << "server parse exception: unknown\n";
-            }
-        }
-        for (int c : to_remove)
-        {
+        for (int c : to_remove) {
             cleanup_disconnected_client(c, clients, session_by_fd, sessions);
         }
     }
+
     close(listen_fd);
     return 0;
 }

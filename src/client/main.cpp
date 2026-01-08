@@ -282,8 +282,7 @@ int connect_to(const std::string &host, int port)
         return -1;
     }
 
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX
-    // socket API requirement
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (connect(s, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
     {
         close(s);
@@ -990,8 +989,6 @@ inline void process_pubkey_response(const Parsed &p)
     std::cout << "pubkey " << p.username << " " << hexpk << "\n";
 }
 
-// === Now the actual reader_thread function ===
-
 void reader_thread(int sock)
 {
     while (should_reconnect && is_connected)
@@ -1166,54 +1163,152 @@ inline MessageContext prepare_message_context(const std::string &recipient_key)
     return ctx;
 }
 
+// Returns true if the line was a command that was fully handled
+inline bool handle_client_command(const std::string &line, int sock)
+{
+    if (line == "help")
+    {
+        std::cout << "q                         quit\n"
+                     "list | list users         list connected users\n"
+                     "pubk <username>           fetch user public key\n"
+                     "<fp[,fp...]> <message>    send message to peer(s)\n";
+        return true;
+    }
+
+    if (line == "q")
+    {
+        should_reconnect = false;
+        is_connected     = false;
+        return true;
+    }
+
+    if (line == "list" || line == "list users" || line == "list user")
+    {
+        const std::vector<unsigned char> p{PROTO_VERSION, MSG_LIST_REQUEST};
+        const auto                       f = build_frame(p);
+        if (full_send(sock, f.data(), f.size()) <= 0)
+        {
+            is_connected = false;
+        }
+        return true;
+    }
+
+    if (line.starts_with("pubk "))
+    {
+        const std::string who = trim(line.substr(5));
+        if (!is_valid_username(who))
+        {
+            std::cout << "invalid username\n";
+            return true;
+        }
+        const auto req = build_pubkey_request(who);
+        if (full_send(sock, req.data(), req.size()) <= 0)
+        {
+            is_connected = false;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+// Recipient parsing
+inline std::vector<std::string> parse_recipient_list(const std::string &input)
+{
+    std::vector<std::string> recipients;
+    size_t                   start = 0;
+    while (true)
+    {
+        const auto comma = input.find(',', start);
+        if (comma == std::string::npos)
+        {
+            const std::string r = trim(input.substr(start));
+            if (!r.empty())
+                recipients.push_back(r);
+            break;
+        }
+        const std::string r = trim(input.substr(start, comma - start));
+        if (!r.empty())
+            recipients.push_back(r);
+        start = comma + 1;
+    }
+    return recipients;
+}
+
+// Strong type to prevent swapping msg and recipient_fp
+struct RecipientFP
+{
+    std::string value;
+    explicit RecipientFP(std::string fp) : value(std::move(fp)) {}
+    [[nodiscard]] const std::string &str() const & { return value; }
+    [[nodiscard]] std::string      &&str()      &&{ return std::move(value); }
+};
+
+// Lazy, thread-safe, immutable my fingerprint — no globals, no flags
+inline const std::array<unsigned char, 32> &get_my_fingerprint_array()
+{
+    static const std::array<unsigned char, 32> my_fp = []()
+    {
+        std::array<unsigned char, 32> arr{};
+        const auto fp = fingerprint_sha256(std::vector<unsigned char>(
+            my_identity_pk.begin(), my_identity_pk.end()));
+        std::copy(fp.begin(), fp.end(), arr.begin());
+        return arr;
+    }();
+    return my_fp;
+}
+
+// "Flawless Victory!"
+inline bool send_message_to_peer(int sock, const std::string &msg,
+                                 const RecipientFP &recipient_fp)
+{
+    rotate_ephemeral_if_needed(sock, recipient_fp.value);
+
+    const auto ctx = prepare_message_context(recipient_fp.value);
+    if (!ctx.valid)
+    {
+        return true;
+    }
+
+    const secure_vector nonce =
+        derive_nonce_from_session(ctx.session_key, ctx.seq);
+
+    const auto ct = aead_encrypt_with_nonce(
+        ctx.session_key, std::vector<unsigned char>(msg.begin(), msg.end()),
+        ctx.aad, nonce);
+
+    const auto frame =
+        build_chat(ctx.target_username, my_username, get_my_fingerprint_array(),
+                   ctx.seq, nonce, ct);
+
+    if (full_send(sock, frame.data(), frame.size()) <= 0)
+    {
+        is_connected = false;
+        return false;
+    }
+
+    {
+        const std::lock_guard<std::mutex> lk(peers_mtx);
+        auto                             &pi = peers[recipient_fp.value];
+        pi.send_seq++;
+        pi.last_send_time = now_ms();
+    }
+
+    const std::string ts = format_hhmmss(now_ms());
+    std::cout << "[" << ts << "] [" << ctx.target_username << " " << ctx.shortfp
+              << "] \"" << msg << "\"\n";
+
+    return true;
+}
+
+// "I am the fire to your ice.", "I do what I must to return home."
 void writer_thread(int sock)
 {
     std::string line;
     while (std::getline(std::cin, line) && is_connected)
     {
-        if (line == "help")
-        {
-            std::cout << "q                         quit\n"
-                         "list | list users         list connected users\n"
-                         "pubk <username>           fetch user public key\n"
-                         "<fp[,fp...]> <message>    send message to peer(s)\n";
+        if (handle_client_command(line, sock))
             continue;
-        }
-
-        if (line == "q")
-        {
-            should_reconnect = false;
-            break;
-        }
-
-        if (line == "list" || line == "list users" || line == "list user")
-        {
-            const std::vector<unsigned char> p{PROTO_VERSION, MSG_LIST_REQUEST};
-            const auto                       f = build_frame(p);
-            if (full_send(sock, f.data(), f.size()) <= 0)
-            {
-                is_connected = false;
-                break;
-            }
-            continue;
-        }
-
-        if (line.starts_with("pubk "))
-        {
-            const std::string who = trim(line.substr(5));
-            if (!is_valid_username(who))
-            {
-                std::cout << "invalid username\n";
-                continue;
-            }
-            const auto req = build_pubkey_request(who);
-            if (full_send(sock, req.data(), req.size()) <= 0)
-            {
-                is_connected = false;
-                break;
-            }
-            continue;
-        }
 
         const size_t pos = line.find(' ');
         if (pos == std::string::npos)
@@ -1231,29 +1326,10 @@ void writer_thread(int sock)
             continue;
         }
 
-        std::vector<std::string> recipients;
-        size_t                   start = 0;
-        while (true)
-        {
-            const auto comma = to.find(',', start);
-            if (comma == std::string::npos)
-            {
-                const std::string r = trim(to.substr(start));
-                if (!r.empty())
-                    recipients.push_back(r);
-                break;
-            }
-            const std::string r = trim(to.substr(start, comma - start));
-            if (!r.empty())
-                recipients.push_back(r);
-            start = comma + 1;
-        }
-
-        const std::vector<std::string> resolved_recipients =
+        const auto recipients = parse_recipient_list(to);
+        const auto resolved_recipients =
             resolve_fingerprint_recipients(recipients);
-
-        const std::vector<std::string> ready_recipients =
-            get_ready_recipients(resolved_recipients);
+        const auto ready_recipients = get_ready_recipients(resolved_recipients);
 
         if (ready_recipients.empty())
         {
@@ -1261,47 +1337,12 @@ void writer_thread(int sock)
             continue;
         }
 
-        std::array<unsigned char, 32> my_fp{};
-        {
-            const auto fp = fingerprint_sha256(std::vector<unsigned char>(
-                my_identity_pk.begin(), my_identity_pk.end()));
-            std::copy(fp.begin(), fp.end(), my_fp.begin());
-        }
-
         for (const auto &r : ready_recipients)
         {
-            rotate_ephemeral_if_needed(sock, r);
-
-            const auto ctx = prepare_message_context(r);
-            if (!ctx.valid)
-                continue;
-
-            const secure_vector nonce =
-                derive_nonce_from_session(ctx.session_key, ctx.seq);
-            const auto ct = aead_encrypt_with_nonce(
-                ctx.session_key,
-                std::vector<unsigned char>(msg.begin(), msg.end()), ctx.aad,
-                nonce);
-
-            const auto frame = build_chat(ctx.target_username, my_username,
-                                          my_fp, ctx.seq, nonce, ct);
-
-            if (full_send(sock, frame.data(), frame.size()) <= 0)
+            if (!send_message_to_peer(sock, msg, RecipientFP{r}))
             {
-                is_connected = false;
                 break;
             }
-
-            {
-                const std::lock_guard<std::mutex> lk(peers_mtx);
-                auto                             &pi = peers[r];
-                pi.send_seq++;
-                pi.last_send_time = now_ms();
-            }
-
-            const std::string ts = format_hhmmss(now_ms());
-            std::cout << "[" << ts << "] [" << ctx.target_username << " "
-                      << ctx.shortfp << "] \"" << msg << "\"\n";
         }
     }
 
@@ -1478,6 +1519,7 @@ inline int attempt_connection(const std::string &server, int port,
 int main(int argc, char **argv) noexcept
 try
 {
+
     const std::span args(argv, static_cast<std::size_t>(argc));
 
     const auto config = parse_command_line_args(args);

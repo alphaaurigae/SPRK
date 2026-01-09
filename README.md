@@ -2,65 +2,66 @@
 
 - Experimental ... 
 
-> tools/pqsig_keygen.cpp to generate keys, see tools/readme.md to build liboqs.
-
 (LLM GENERATED README)
 
 # SPRK-Chat
 
-**Experimental Post-Quantum Secure End-to-End Encrypted Chat**
+**Experimental Post-Quantum End-to-End Encrypted Chat**
 
 
-## Strengths — What It Gets Right
+## Features
 
-- **End-to-end encrypted messages** using symmetric AEAD derived from ML-KEM (Kyber) shared secrets
-- **Post-quantum key exchange** (ML-KEM via liboqs)
-- **Post-quantum digital signatures** (ML-DSA) for long-term identity authentication
-- **Forward secrecy** via automatic ephemeral rekeying (~every 1024 messages)
-- Replay protection with per-sender sequence numbers, jitter tolerance, and gap checks
-- Rate limiting (100 msgs/sec per client) and stale message timeouts (60s)
-- Username validation and similarity checks to reduce confusion attacks
-- Sender fingerprints (SHA-256 of long-term public key) displayed with every message
-- Clean, readable codebase with modern C++ features and CMake build system
-- No server-side message persistence
+- Key exchange `ML-KEM` via `liboqs`
+- Signatures `ML-DSA`
+- Symmetric AEAD encryption for messages
+- Rekeying
+- Replay protection
+- Rate limiting
+- Username validation and similarity checks
+- Sender fingerprint display
 
-These features provide strong protection against **passive eavesdropping**, **message tampering**, **replays**, and **future quantum decryption attacks** (harvest-now-decrypt-later).
+## Limitations
 
-## Weaknesses — Important Limitations
+- Trust-on-first-use (TOFU) for initial authentication
+- No transport encryption (plain TCP) — add TLS for production e.g `open-quantum-safe/oqs-provider`
+- No persistence or offline delivery
 
-This is an **experimental prototype with no security audit**. Do **not** use it for sensitive or private communications without understanding the risks.
-
-### Critical Technical Weaknesses
-- **Unauthenticated initial handshake (TOFU — Trust On First Use)**  
-  The first key exchange and identity binding occur without prior authenticated channel.  
-  An **active man-in-the-middle attacker** who intercepts and modifies traffic **during the initial handshake** can impersonate participants by substituting their own long-term keys and relay all subsequent traffic undetected.  
-  Once the legitimate handshake completes, later messages remain securely E2E-encrypted and an attacker cannot insert themselves.  
-  → **Mitigation**: Manually verify fingerprints or safety numbers with chat partners on first contact (e.g., via voice call or another channel).
-
-- **No built-in transport encryption**  
-  All traffic runs over plain TCP:  
-  - Metadata (IP addresses, timestamps, message sizes, fingerprints, session IDs) is visible to anyone on the network path **throughout the entire session**.  
-  - An active attacker can perform the above MITM impersonation attack **only if they control the initial handshake**.  
-  → For metadata protection and handshake integrity, run the server behind stunnel, a TLS-terminating reverse proxy (e.g., Nginx with post-quantum TLS), or similar.
-
-- **No formal security audit or third-party review**  
-  Custom protocol and crypto integration carry a high risk of subtle implementation bugs.
 
 ## Build & Run
 
 ### Dependencies
-- liboqs (Open Quantum Safe)
-- OpenSSL ≥ 3.0
-- CMake ≥ 3.20
-- C++23-capable compiler (g++/clang++)
+- `liboqs` (Open Quantum Safe)
+- `OpenSSL ≥ 3.0`
+- `CMake ≥ 3.20`
+- `g++/clang++`
 
-Detailed liboqs build instructions are in `tools/readme.md`.
+> liboqs e.g `tools/readme.md`.
 
 
-### Building
+### Build Client && Server
 ```bash
-./scripts/build.sh
+./build_cmake.sh
 ```
+
+### Build KEYGEN
+- Alt use sample keys in `sample/sample_test_key`
+```
+cd tools/
+g++ -std=c++23 -DUSE_LIBOQS -O2 -Wall -Wextra \
+$(pkg-config --cflags liboqs) \
+pqsig_keygen.cpp -o pqsig_keygen \
+$(pkg-config --libs liboqs) \
+-lssl -lcrypto
+```
+`Usage: pqsig_keygen <output.sk>`
+
+
+### Test
+```
+./unit.sh
+./clang-format_clang-tidy.sh
+```
+
 
 ### SERVER
 ```
@@ -79,8 +80,6 @@ disconnect bob session=yBiaFexrr7bXgTM2PB7SjjpiLdTEUQSWSxwhqAxr6GkT3KMeZcB1VskUB
 connect bob session=yBiaFexrr7bXgTM2PB7SjjpiLdTEUQSWSxwhqAxr6GkT3KMeZcB1VskUBQhn
 connect ron session=yBiaFexrr7bXgTM2PB7SjjpiLdTEUQSWSxwhqAxr6GkT3KMeZcB1VskUBQhn
 connect beth session=yBiaFexrr7bXgTM2PB7SjjpiLdTEUQSWSxwhqAxr6GkT3KMeZcB1VskUBQhn
-
-
 ```
 
 ### CLIENT 1
@@ -107,7 +106,6 @@ ron [5e2da901c732f40b7b1466f573afd8b9d843cb990aab1021dac7daaa20023c58]
 [1767658656873] peer bob rekeyed
 [01:17:36] connect bob pubkey=7231448d05...507bfb5bdb
 [01:17:48] [bob 87fab05a43] back
-
 ```
 
 ### CLIENT 2
@@ -175,7 +173,6 @@ $ /home/mmmm/Desktop/SPRK_dev/bin/client 127.0.0.1 1566  bob /home/mmmm/Desktop/
 [01:17:48] [ron 5e2da901c7] "back"
 7556c04652e0e852f67cbfd2337f33d3e6c86bcb298c2040bc28a0238d53354a back
 [01:18:03] [beth 7556c04652] "back"
-
 ```
 
 ### Unit ./unit.sh

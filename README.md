@@ -6,7 +6,7 @@
 
 # SPRK-Chat
 
-**Experimental Post-Quantum End-to-End Encrypted Chat**
+**Post-Quantum End-to-End Encrypted Chat**
 
 
 ## Features

@@ -13,7 +13,9 @@
 
 ```
 What the Program Does
-This is a real-time, end-to-end encrypted chat application with a client-server architecture. It's designed for secure messaging using post-quantum cryptography (PQ crypto) to resist future quantum attacks. The server acts as a relay for messages but doesn't decrypt them—encryption is purely client-side. Key features include:
+This is a real-time, end-to-end encrypted chat application with a client-server architecture. 
+It's designed for secure messaging using post-quantum cryptography (PQ crypto) to resist future quantum attacks. 
+The server acts as a relay for messages but doesn't decrypt them—encryption is purely client-side. Key features include:
 
 Multi-user sessions where clients join with usernames and public keys.
 Automatic key exchanges for shared secrets, with periodic rekeying for forward secrecy.
@@ -22,7 +24,8 @@ Fingerprint-based sender verification (displayed in chat for trust-on-first-use)
 Basic commands like listing users or fetching public keys.
 Resilience to disconnects/reconnects, with timeouts and backoff.
 
-It's not a full production app (e.g., no persistence, offline delivery, or group chats beyond broadcasting), but it's a solid proof-of-concept for PQ-secure comms. The server handles coordination, while clients manage the crypto-heavy lifting.
+It's not a full production app (e.g., no persistence, offline delivery, or group chats beyond broadcasting), 
+but it's a solid proof-of-concept for PQ-secure comms. The server handles coordination, while clients manage the crypto-heavy lifting.
 High-Level Flow
 The app follows a classic TCP/TLS-based client-server model, with a custom protocol for messages (HELLO for handshakes, CHAT for messages, etc.). Here's the step-by-step flow:
 

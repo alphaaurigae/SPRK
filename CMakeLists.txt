@@ -10,6 +10,7 @@ set(PROJECT_VERSION "888.0.0")
 
 set(BIN1 "client")
 set(BIN2 "server")
+set(BIN3 "user_keygen")
 # [add executeables here] main name definition
 
 
@@ -210,6 +211,7 @@ include_directories(
     ${SRC_DIR}/shared
     ${SRC_DIR}/client
     ${SRC_DIR}/server
+    ${SRC_DIR}/user_keygen
 )
 
 
@@ -297,9 +299,11 @@ set(LIBS_MAIN
 # per bin
 set(LIBS_${BIN1} )
 set(LIBS_${BIN2} )
+set(LIBS_${BIN3} )
 
 option(BUILD_${BIN1} "Enable ${BIN1}" ON)
 option(BUILD_${BIN2} "Enable ${BIN2}" ON)
+option(BUILD_${BIN3} "Enable ${BIN3}" ON)
 
 function(add_feature_executable FEATURE FEATURE_SOURCES)
     set(FEATURE_OPTION "BUILD_${FEATURE}")
@@ -322,6 +326,7 @@ endfunction()
 
 add_feature_executable(${BIN1} ${SRC_DIR}/${BIN1}/main.cpp)
 add_feature_executable(${BIN2} ${SRC_DIR}/${BIN2}/main.cpp)
+add_feature_executable(${BIN3} ${SRC_DIR}/${BIN3}/main.cpp)
 
 file(MAKE_DIRECTORY ${BUILD_DIR})
 file(MAKE_DIRECTORY ${BIN_DIR})
@@ -369,6 +374,7 @@ message(STATUS "Compile Commands Export: ${ENABLE_COMPILE_COMMANDS}")
 message(STATUS "------------------------------------------------------------")
 message(STATUS "Build ${BIN1}: ${BUILD_${BIN1}}")
 message(STATUS "Build ${BIN2}: ${BUILD_${BIN2}}")
+message(STATUS "Build ${BIN3}: ${BUILD_${BIN3}}")
 # [add executeables here]
 
 

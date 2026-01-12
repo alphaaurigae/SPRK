@@ -1,5 +1,7 @@
 # Build directory
 build/
+bin/
+clang_tidy_output/
 
 # CMake files
 CMakeFiles/

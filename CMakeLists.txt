@@ -228,13 +228,65 @@ include_directories(
 # find_package(OpenCV REQUIRED VERSION 4.5.0 EXACT)
 # find_package(OpenCV REQUIRED VERSION 3.4.0 EXACT 4.5.0)
 #find_package(OpenCV REQUIRED)
-find_library(OQS_LIB NAMES oqs PATHS /usr/local/lib /usr/lib)
-find_path(OQS_INCLUDE_DIR NAMES oqs/oqs.h PATHS /usr/local/include /usr/include)
+set(OPENSSL_ROOT_DIR "/usr/local/openssl-3.5")
+
+# Improve pkg-config discovery (you already have ENV, but make sure)
+list(APPEND CMAKE_PREFIX_PATH "${OPENSSL_ROOT_DIR}")
+set(ENV{PKG_CONFIG_PATH} 
+    "${OPENSSL_ROOT_DIR}/lib64/pkgconfig:${OPENSSL_ROOT_DIR}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}"
+)
+
+
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(LIBOQS QUIET liboqs)
+endif()
+
+if(LIBOQS_FOUND)
+    set(OQS_INCLUDE_DIR ${LIBOQS_INCLUDE_DIRS})
+    set(OQS_LIB ${LIBOQS_LIBRARIES})
+    message(STATUS "liboqs found via pkg-config: ${OQS_LIB}")
+else()
+    find_library(OQS_LIB NAMES oqs liboqs.a liboqs.so
+        PATHS "${OPENSSL_ROOT_DIR}/lib64" "${OPENSSL_ROOT_DIR}/lib"
+              NO_DEFAULT_PATH)
+    find_path(OQS_INCLUDE_DIR NAMES oqs/oqs.h
+        PATHS "${OPENSSL_ROOT_DIR}/include"
+              NO_DEFAULT_PATH)
+    if(NOT OQS_INCLUDE_DIR OR NOT OQS_LIB)
+        message(FATAL_ERROR "liboqs not found in ${OPENSSL_ROOT_DIR}")
+    endif()
+    message(STATUS "liboqs found manually: ${OQS_LIB}")
+endif()
+
+# === NEW: Handle static-only case explicitly ===
+if(EXISTS "${OPENSSL_ROOT_DIR}/lib/liboqs.a")
+    set(OQS_LIB "${OPENSSL_ROOT_DIR}/lib/liboqs.a")
+    message(STATUS "Using static liboqs.a explicitly")
+elseif(EXISTS "${OPENSSL_ROOT_DIR}/lib64/liboqs.a")
+    set(OQS_LIB "${OPENSSL_ROOT_DIR}/lib64/liboqs.a")
+    message(STATUS "Using static liboqs.a explicitly (lib64)")
+endif()
+
+# Ensure linker sees both directories
+link_directories("${OPENSSL_ROOT_DIR}/lib64" "${OPENSSL_ROOT_DIR}/lib")
+
+# =============================================================================
+# Everything below this line: **unchanged** from your template
+# =============================================================================
+
 find_package(OpenSSL 3 REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
 link_libraries(${OPENSSL_LIBRARIES})
 
-# global
+set(OPENSSL_INCLUDE_DIR "${OPENSSL_ROOT_DIR}/include")
+set(OPENSSL_CRYPTO_LIBRARY "${OPENSSL_ROOT_DIR}/lib64/libcrypto.so")
+set(OPENSSL_SSL_LIBRARY "${OPENSSL_ROOT_DIR}/lib64/libssl.so")
+set(OPENSSL_LIBRARIES ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY})
+
+find_package(OpenSSL 3.5 REQUIRED)
+include_directories(${OPENSSL_INCLUDE_DIR})
+
 set(LIBS_MAIN
   ssl
   crypto
@@ -243,48 +295,36 @@ set(LIBS_MAIN
 )
 
 # per bin
-set(LIBS_${BIN1}
-)
-set(LIBS_${BIN2}
-)
-
+set(LIBS_${BIN1} )
+set(LIBS_${BIN2} )
 
 option(BUILD_${BIN1} "Enable ${BIN1}" ON)
 option(BUILD_${BIN2} "Enable ${BIN2}" ON)
-# [add executeables here]
-
 
 function(add_feature_executable FEATURE FEATURE_SOURCES)
     set(FEATURE_OPTION "BUILD_${FEATURE}")
 
     if(${${FEATURE_OPTION}})
         add_executable(${FEATURE} ${FEATURE_SOURCES})
-        target_link_libraries(${FEATURE} PRIVATE ${LIBS_MAIN})
+        target_link_libraries(${FEATURE} PRIVATE ${LIBS_MAIN} ${OPENSSL_LIBRARIES})
+
         target_include_directories(${FEATURE} PRIVATE ${OQS_INCLUDE_DIR})
         target_compile_definitions(${FEATURE} PRIVATE USE_LIBOQS)
-	target_include_directories(${FEATURE} PRIVATE ${OPENSSL_INCLUDE_DIR})
+        target_include_directories(${FEATURE} PRIVATE ${OPENSSL_INCLUDE_DIR})
 
-        if(${FEATURE} STREQUAL ${BIN1})
-            target_link_libraries(${FEATURE} PRIVATE ${LIBS_${BIN1}})
-        endif()
-        if(${FEATURE} STREQUAL ${BIN2})
-            target_link_libraries(${FEATURE} PRIVATE ${LIBS_${BIN2}})
-        endif()
-
-
-        set_target_properties(${FEATURE} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${BIN_DIR})
+        set_target_properties(${FEATURE} PROPERTIES
+            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "${OPENSSL_ROOT_DIR}/lib64;${OPENSSL_ROOT_DIR}/lib"  # ← also updated here for runtime
+            RUNTIME_OUTPUT_DIRECTORY ${BIN_DIR}
+        )
     endif()
 endfunction()
 
-
 add_feature_executable(${BIN1} ${SRC_DIR}/${BIN1}/main.cpp)
 add_feature_executable(${BIN2} ${SRC_DIR}/${BIN2}/main.cpp)
-# [add executeables here]
-
 
 file(MAKE_DIRECTORY ${BUILD_DIR})
 file(MAKE_DIRECTORY ${BIN_DIR})
-
 
 # Clean -------------------------------------------------------------------------------------------------------------------------------------
 add_custom_target(my_clean

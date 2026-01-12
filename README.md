@@ -9,6 +9,8 @@
 **Post-Quantum End-to-End Encrypted Chat**
 
 
+# README IST DATED ... TLS openssl 3.5 integration . ... need testing / tidyup ...
+
 ## Features
 
 - Key exchange `ML-KEM` via `liboqs`

@@ -13,6 +13,55 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/provider.h> 
+
+
+struct ClientState {
+    int fd = -1;
+    SSL* ssl = nullptr;
+
+    ClientState() = default;
+    ClientState(int f, SSL* s) : fd(f), ssl(s) {}
+    
+    ClientState(const ClientState&) = delete;
+    ClientState& operator=(const ClientState&) = delete;
+    
+    ClientState(ClientState&& other) noexcept : fd(other.fd), ssl(other.ssl) {
+        other.fd = -1;
+        other.ssl = nullptr;
+    }
+    
+    ClientState& operator=(ClientState&& other) noexcept {
+        if (this != &other) {
+            cleanup();
+            fd = other.fd;
+            ssl = other.ssl;
+            other.fd = -1;
+            other.ssl = nullptr;
+        }
+        return *this;
+    }
+
+    ~ClientState() {
+        cleanup();
+    }
+
+private:
+    void cleanup() noexcept {
+        if (ssl) {
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            ssl = nullptr;
+        }
+        if (fd >= 0) {
+            close(fd);
+            fd = -1;
+        }
+    }
+};
+
 
 int make_listen(int port)
 {
@@ -83,55 +132,49 @@ int set_nonblock(int fd)
     return 0;
 }
 
-inline bool accept_new_client(int listen_fd, std::vector<int> &clients)
-{
+
+inline bool accept_new_client(int listen_fd, std::vector<ClientState>& clients, SSL_CTX* ctx) {
     int c = accept(listen_fd, nullptr, nullptr);
-    if (c < 0)
-        return false;
-
-    if (c >= FD_SETSIZE)
-    {
+    if (c < 0) return false;
+    if (c >= FD_SETSIZE) {
         close(c);
         return true;
     }
-
-    if (set_nonblock(c) != 0)
-    {
+    
+    if (set_nonblock(c) != 0) {
         close(c);
         return true;
     }
-
-    clients.push_back(c);
+    
+    SSL* ssl = SSL_new(ctx);
+    if (!ssl) {
+        close(c);
+        return true;
+    }
+    SSL_set_fd(ssl, c);
+    SSL_set_accept_state(ssl);
+    
+    clients.push_back({c, ssl});
     return true;
 }
 
-inline std::string trim(std::string s)
-{
-    auto is_space = [](unsigned char c)
-    { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [&](unsigned char c)
-                                    { return !is_space(c); }));
-    s.erase(std::find_if(s.rbegin(), s.rend(),
-                         [&](unsigned char c) { return !is_space(c); })
-                .base(),
-            s.end());
+inline std::string trim(std::string s) {
+    auto is_space = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [&](unsigned char c) { return !is_space(c); }));
+    s.erase(std::find_if(s.rbegin(), s.rend(), [&](unsigned char c) { return !is_space(c); }).base(), s.end());
     return s;
 }
 
-struct SessionData
-{
+
+struct SessionData {
     std::unordered_map<int, std::string> nick_by_fd;
     std::unordered_map<std::string, int> fd_by_nick;
-
-    std::unordered_map<int, std::string>         fingerprint_hex_by_fd;
-    std::unordered_map<std::string, int>         fd_by_fingerprint;
+    std::unordered_map<int, std::string> fingerprint_hex_by_fd;
+    std::unordered_map<std::string, int> fd_by_fingerprint;
     std::unordered_map<std::string, std::string> nick_by_fingerprint;
-    std::unordered_map<std::string, std::vector<unsigned char>>
-        eph_by_fingerprint;
-    std::unordered_map<std::string, std::vector<unsigned char>>
-        identity_pk_by_fingerprint;
-    std::unordered_map<std::string, std::vector<unsigned char>>
-        hello_message_by_fingerprint;
+    std::unordered_map<std::string, std::vector<unsigned char>> eph_by_fingerprint;
+    std::unordered_map<std::string, std::vector<unsigned char>> identity_pk_by_fingerprint;
+    std::unordered_map<std::string, std::vector<unsigned char>> hello_message_by_fingerprint;
 };
 
 static int lcs_len(const std::string &a, const std::string &b)
@@ -171,87 +214,84 @@ too_similar_username(const std::string                          &u,
         });
 }
 
-inline bool recv_full_frame(int fd, std::vector<unsigned char> &frame)
-{
-    std::array<unsigned char, 4> lenbuf{};
-    ssize_t n = recv(fd, lenbuf.data(), lenbuf.size(), MSG_PEEK);
 
-    if (n < static_cast<ssize_t>(lenbuf.size()))
-    {
-        return (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
-        // Returns true only on EAGAIN/EWOULDBLOCK, false on partial header or
-        // real error
+inline bool recv_full_frame(const ClientState& client, std::vector<unsigned char>& frame) {
+    std::array<unsigned char, 4> lenbuf{};
+    ssize_t n = SSL_peek(client.ssl, lenbuf.data(), lenbuf.size());
+
+    if (n < static_cast<ssize_t>(lenbuf.size())) {
+        int err = SSL_get_error(client.ssl, n);
+        return (n < 0 && (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE));
     }
 
     uint32_t payload_len = read_u32_be(lenbuf.data());
-    if (payload_len > 64 * 1024)
-        return false;
+    if (payload_len > 64 * 1024) return false;
 
     frame.resize(4 + payload_len);
-    ssize_t got = full_recv(fd, frame.data(), frame.size());
+    ssize_t got = tls_full_recv(client.ssl, frame.data(), frame.size());
     return got > 0;
 }
 
 inline void cleanup_disconnected_client(
-    int c, std::vector<int> &clients,
-    std::unordered_map<int, std::string>         &session_by_fd,
-    std::unordered_map<std::string, SessionData> &sessions)
+    int client_fd,
+    std::vector<ClientState>& clients,
+    std::unordered_map<int, std::string>& session_by_fd,
+    std::unordered_map<std::string, SessionData>& sessions)
 {
-    auto sid_it = session_by_fd.find(c);
-    if (sid_it == session_by_fd.end())
-    {
-        close(c);
-        clients.erase(std::remove(clients.begin(), clients.end(), c),
-                      clients.end());
+    auto sid_it = session_by_fd.find(client_fd);
+    if (sid_it == session_by_fd.end()) {
+        auto it = std::find_if(clients.begin(), clients.end(),
+                               [client_fd](const ClientState& cs) { return cs.fd == client_fd; });
+        if (it != clients.end()) clients.erase(it);
         return;
     }
 
-    std::string sid        = sid_it->second;
-    auto        session_it = sessions.find(sid);
-    if (session_it == sessions.end())
-    {
-        session_by_fd.erase(c);
-        close(c);
-        clients.erase(std::remove(clients.begin(), clients.end(), c),
-                      clients.end());
+    std::string sid = sid_it->second;
+    auto session_it = sessions.find(sid);
+    if (session_it == sessions.end()) {
+        session_by_fd.erase(client_fd);
+        auto it = std::find_if(clients.begin(), clients.end(),
+                               [client_fd](const ClientState& cs) { return cs.fd == client_fd; });
+        if (it != clients.end()) clients.erase(it);
         return;
     }
 
-    SessionData &sd = session_it->second;
+    SessionData& sd = session_it->second;
 
     std::string nick;
-    auto        nit = sd.nick_by_fd.find(c);
+    auto nit = sd.nick_by_fd.find(client_fd);
     if (nit != sd.nick_by_fd.end())
         nick = nit->second;
 
     std::string fp_hex;
-    auto        iit = sd.fingerprint_hex_by_fd.find(c);
+    auto iit = sd.fingerprint_hex_by_fd.find(client_fd);
     if (iit != sd.fingerprint_hex_by_fd.end())
         fp_hex = iit->second;
 
-    if (!fp_hex.empty())
-    {
+    if (!fp_hex.empty()) {
         sd.fd_by_fingerprint.erase(fp_hex);
         sd.nick_by_fingerprint.erase(fp_hex);
         sd.eph_by_fingerprint.erase(fp_hex);
         sd.identity_pk_by_fingerprint.erase(fp_hex);
         sd.hello_message_by_fingerprint.erase(fp_hex);
-        sd.fingerprint_hex_by_fd.erase(c);
+        sd.fingerprint_hex_by_fd.erase(client_fd);
     }
 
-    if (!nick.empty())
-    {
+    if (!nick.empty()) {
         sd.fd_by_nick.erase(nick);
-        sd.nick_by_fd.erase(c);
+        sd.nick_by_fd.erase(client_fd);
     }
 
-    std::cout << "disconnect " << nick << " session=" << sid << "\n";
+    session_by_fd.erase(client_fd);
 
-    session_by_fd.erase(c);
-    close(c);
-    clients.erase(std::remove(clients.begin(), clients.end(), c),
-                  clients.end());
+    auto it = std::find_if(clients.begin(), clients.end(),
+                           [client_fd](const ClientState& cs) { return cs.fd == client_fd; });
+    if (it != clients.end()) {
+        std::cout << "disconnect " << nick << " session=" << sid << "\n";
+        clients.erase(it);
+    }
 }
+
 
 // Returns empty string on success, error message on failure
 static std::string validate_hello_basics(const Parsed &p, std::string &uname,
@@ -347,6 +387,7 @@ static void register_client(SessionData &sd, int client_fd,
                             const std::string &uname, const Parsed &p,
                             const std::vector<unsigned char> &frame)
 {
+
     // Compute fingerprint if identity key present
     std::string fp_hex;
     if (!p.identity_pk.empty())
@@ -376,24 +417,31 @@ static void register_client(SessionData &sd, int client_fd,
 }
 
 static void broadcast_hello_to_peers(const SessionData &sd, int client_fd,
-                                     const std::vector<unsigned char> &frame)
+                                     const std::vector<unsigned char> &frame,
+                                     const std::vector<ClientState>& clients)
 {
     for (const auto &kv : sd.fd_by_nick)
     {
-        int fd = kv.second;
-        if (fd == client_fd)
-            continue;
-        full_send(fd, frame.data(), frame.size());
+        int dst_fd = kv.second;
+        if (dst_fd == client_fd) continue;
+
+        auto it = std::find_if(clients.begin(), clients.end(),
+                               [dst_fd](const ClientState& cs) { return cs.fd == dst_fd; });
+        if (it != clients.end()) {
+            tls_full_send(it->ssl, frame.data(), frame.size());
+        }
     }
 }
 
-inline bool
-handle_hello_message(int client_fd, const Parsed &p,
-                     const std::vector<unsigned char>             &frame,
-                     std::unordered_map<std::string, SessionData> &sessions,
-                     std::unordered_map<int, std::string> &session_by_fd,
-                     std::vector<int>                     &to_remove)
+inline bool handle_hello_message(const ClientState& client_state,
+                                 const Parsed &p,
+                                 const std::vector<unsigned char> &frame,
+                                 std::unordered_map<std::string, SessionData> &sessions,
+                                 std::unordered_map<int, std::string> &session_by_fd,
+                                 std::vector<ClientState>& clients,
+                                 std::vector<int> &to_remove)
 {
+    int client_fd = client_state.fd;
     std::string uname;
     std::string sid;
     std::string error = validate_hello_basics(p, uname, sid);
@@ -418,7 +466,7 @@ handle_hello_message(int client_fd, const Parsed &p,
     session_by_fd[client_fd] = sid;
     std::cout << "connect " << uname << " session=" << sid << "\n";
 
-    broadcast_hello_to_peers(sd, client_fd, frame);
+    broadcast_hello_to_peers(sd, client_fd, frame, clients);
 
     // Send existing hellos to new client (core protocol handshake — keep
     // visible)
@@ -435,124 +483,116 @@ handle_hello_message(int client_fd, const Parsed &p,
         try
         {
             uint32_t existing_payload_len = read_u32_be(existing_hello.data());
-            Parsed   p2 =
-                parse_payload(existing_hello.data() + 4, existing_payload_len);
+            Parsed p2 = parse_payload(existing_hello.data() + 4, existing_payload_len);
             std::vector<unsigned char> empty_encaps;
             auto stripped = build_hello(p2.username, ALGO_KYBER512, p2.eph_pk,
                                         p2.id_alg, p2.identity_pk, p2.signature,
                                         empty_encaps, p2.session_id);
-            full_send(client_fd, stripped.data(), stripped.size());
+            tls_full_send(client_state.ssl, stripped.data(), stripped.size());
         }
         catch (...)
         {
-            full_send(client_fd, existing_hello.data(), existing_hello.size());
+            tls_full_send(client_state.ssl, existing_hello.data(), existing_hello.size());
         }
     }
 
     return true;
 }
 
-inline void
-handle_chat_message(int client_fd, const Parsed &p,
-                    const std::vector<unsigned char>             &frame,
-                    const std::unordered_map<int, std::string>   &session_by_fd,
-                    std::unordered_map<std::string, SessionData> &sessions)
+inline void handle_chat_message(const ClientState& client_state,
+                                const Parsed &p,
+                                const std::vector<unsigned char> &frame,
+                                const std::unordered_map<int, std::string> &session_by_fd,
+                                std::unordered_map<std::string, SessionData> &sessions,
+                                const std::vector<ClientState>& clients)
 {
+    int client_fd = client_state.fd;
     auto sid_it = session_by_fd.find(client_fd);
-    if (sid_it == session_by_fd.end())
-        return;
+    if (sid_it == session_by_fd.end()) return;
 
     auto sess_it = sessions.find(sid_it->second);
-    if (sess_it == sessions.end())
-        return;
+    if (sess_it == sessions.end()) return;
 
     SessionData &sd = sess_it->second;
 
     int dst = -1;
 
-    // Fast path: exact nickname
     if (auto it = sd.fd_by_nick.find(p.to); it != sd.fd_by_nick.end())
     {
         dst = it->second;
     }
-    // Slow path: only if needed
     else if (p.to.size() >= 4)
     {
         std::string lower = p.to;
-        std::ranges::transform(lower, lower.begin(), [](unsigned char c)
-                               { return static_cast<char>(std::tolower(c)); });
+        std::ranges::transform(lower, lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-        if (auto it = std::ranges::find_if(
-                sd.fd_by_fingerprint,
-                [&lower](const auto &kv)
-                {
-                    const std::string &fp = kv.first;
-                    if (fp.size() < lower.size())
-                        return false;
-                    return std::ranges::equal(
-                        lower.begin(), lower.end(), fp.begin(),
-                        fp.begin() + lower.size(),
-                        [](unsigned char a, unsigned char b)
-                        { return std::tolower(a) == std::tolower(b); });
-                });
-            it != sd.fd_by_fingerprint.end())
-        {
-            dst = it->second;
-        }
+        auto it = std::ranges::find_if(sd.fd_by_fingerprint,
+                                       [&lower](const auto& kv) {
+                                           const std::string& fp = kv.first;
+                                           if (fp.size() < lower.size()) return false;
+                                           return std::ranges::equal(lower.begin(), lower.end(),
+                                                                     fp.begin(), fp.begin() + lower.size(),
+                                                                     [](unsigned char a, unsigned char b) {
+                                                                         return std::tolower(a) == std::tolower(b);
+                                                                     });
+                                       });
+        if (it != sd.fd_by_fingerprint.end()) dst = it->second;
     }
 
-    // Branchless send
-    size_t size = static_cast<size_t>(dst != -1) * frame.size();
-    full_send(dst, frame.data(), size);
+    if (dst != -1) {
+        auto it = std::find_if(clients.begin(), clients.end(),
+                               [dst](const ClientState& cs) { return cs.fd == dst; });
+        if (it != clients.end()) {
+            tls_full_send(it->ssl, frame.data(), frame.size());
+        }
+    }
 }
 
-inline void
-handle_list_request(int                                           client_fd,
-                    const std::unordered_map<int, std::string>   &session_by_fd,
-                    std::unordered_map<std::string, SessionData> &sessions)
+inline void handle_list_request(const ClientState& client_state,
+                                const std::unordered_map<int, std::string>& session_by_fd,
+                                std::unordered_map<std::string, SessionData>& sessions,
+                                const std::vector<ClientState>& clients)
 {
+    int client_fd = client_state.fd;
     auto sid_it = session_by_fd.find(client_fd);
-    if (sid_it == session_by_fd.end())
-        return;
+    if (sid_it == session_by_fd.end()) return;
 
-    const std::string &sid        = sid_it->second;
-    auto               session_it = sessions.find(sid);
-    if (session_it == sessions.end())
-        return;
+    const std::string& sid = sid_it->second;
+    auto session_it = sessions.find(sid);
+    if (session_it == sessions.end()) return;
 
-    SessionData             &sd = session_it->second;
+    SessionData& sd = session_it->second;
     std::vector<std::string> users;
     users.reserve(sd.fd_by_nick.size());
-    for (auto &kv : sd.fd_by_nick)
-        users.push_back(kv.first);
+    for (auto& kv : sd.fd_by_nick) users.push_back(kv.first);
     auto resp = build_list_response(users);
-    full_send(client_fd, resp.data(), resp.size());
+    tls_full_send(client_state.ssl, resp.data(), resp.size());
 }
 
-inline void
-handle_pubkey_request(int client_fd, const Parsed &p,
-                      const std::unordered_map<int, std::string> &session_by_fd,
-                      std::unordered_map<std::string, SessionData> &sessions)
+inline void handle_pubkey_request(const ClientState& client_state,
+                                  const Parsed &p,
+                                  const std::unordered_map<int, std::string>& session_by_fd,
+                                  std::unordered_map<std::string, SessionData>& sessions,
+                                  const std::vector<ClientState>& clients)
 {
+    int client_fd = client_state.fd;
     auto sid_it = session_by_fd.find(client_fd);
-    if (sid_it == session_by_fd.end())
-        return;
+    if (sid_it == session_by_fd.end()) return;
 
-    const std::string &sid        = sid_it->second;
-    auto               session_it = sessions.find(sid);
-    if (session_it == sessions.end())
-        return;
+    const std::string& sid = sid_it->second;
+    auto session_it = sessions.find(sid);
+    if (session_it == sessions.end()) return;
 
-    SessionData &sd     = session_it->second;
-    std::string  target = trim(p.username);
+    SessionData& sd = session_it->second;
+    std::string target = trim(p.username);
 
     std::vector<unsigned char> pk;
 
     auto itn = sd.fd_by_nick.find(target);
     if (itn != sd.fd_by_nick.end())
     {
-        int  dstfd = itn->second;
-        auto itfp  = sd.fingerprint_hex_by_fd.find(dstfd);
+        int dstfd = itn->second;
+        auto itfp = sd.fingerprint_hex_by_fd.find(dstfd);
         if (itfp != sd.fingerprint_hex_by_fd.end())
         {
             auto itpk = sd.identity_pk_by_fingerprint.find(itfp->second);
@@ -563,23 +603,21 @@ handle_pubkey_request(int client_fd, const Parsed &p,
     else
     {
         std::vector<std::string> matches;
-        for (auto &kv : sd.identity_pk_by_fingerprint)
+        for (auto& kv : sd.identity_pk_by_fingerprint)
         {
-            const std::string &hexfp = kv.first;
+            const std::string& hexfp = kv.first;
             if (hexfp.size() >= target.size())
             {
                 bool ok = true;
                 for (size_t i = 0; i < target.size(); ++i)
                 {
-                    if (std::tolower((unsigned char)hexfp[i]) !=
-                        std::tolower((unsigned char)target[i]))
+                    if (std::tolower((unsigned char)hexfp[i]) != std::tolower((unsigned char)target[i]))
                     {
                         ok = false;
                         break;
                     }
                 }
-                if (ok)
-                    matches.push_back(hexfp);
+                if (ok) matches.push_back(hexfp);
             }
         }
         if (matches.size() == 1)
@@ -588,17 +626,14 @@ handle_pubkey_request(int client_fd, const Parsed &p,
         }
     }
     auto resp = build_pubkey_response(target, pk);
-    full_send(client_fd, resp.data(), resp.size());
+    tls_full_send(client_state.ssl, resp.data(), resp.size());
 }
 
-static void prune_invalid_clients(std::vector<int> &clients)
-{
+static void prune_invalid_clients(std::vector<ClientState>& clients) {
     clients.erase(std::remove_if(clients.begin(), clients.end(),
-                                 [](int fd)
-                                 {
-                                     if (fd >= FD_SETSIZE)
-                                     {
-                                         close(fd);
+                                 [](const ClientState& cs) {
+                                     if (cs.fd >= FD_SETSIZE) {
+                                         // Destructor handles close & SSL_free
                                          return true;
                                      }
                                      return false;
@@ -606,131 +641,225 @@ static void prune_invalid_clients(std::vector<int> &clients)
                   clients.end());
 }
 
-static int prepare_select(fd_set &rfds, int listen_fd,
-                          const std::vector<int> &clients)
-{
+static int prepare_select(fd_set& rfds, int listen_fd,
+                          const std::vector<ClientState>& clients) {
     FD_ZERO(&rfds);
     FD_SET(listen_fd, &rfds);
     int maxfd = listen_fd;
 
-    for (int c : clients)
-    {
-        FD_SET(c, &rfds);
-        if (c > maxfd)
-            maxfd = c;
+    for (const auto& cs : clients) {
+        FD_SET(cs.fd, &rfds);
+        if (cs.fd > maxfd) maxfd = cs.fd;
     }
 
     return maxfd;
 }
 
-static void
-process_client_events(const fd_set &rfds, const std::vector<int> &clients,
-                      std::unordered_map<std::string, SessionData> &sessions,
-                      std::unordered_map<int, std::string> &session_by_fd,
-                      std::vector<int>                     &to_remove)
+static void process_client_events(const fd_set& rfds,
+                                  std::vector<ClientState>& clients,
+                                  std::unordered_map<std::string, SessionData>& sessions,
+                                  std::unordered_map<int, std::string>& session_by_fd,
+                                  std::vector<int>& to_remove)
 {
-    for (int c : clients)
-    {
-        if (!FD_ISSET(c, &rfds))
-            continue;
-
-        std::vector<unsigned char> frame;
-        if (!recv_full_frame(c, frame))
-        {
-            to_remove.push_back(c);
-            continue;
-        }
-
-        uint32_t payload_len = read_u32_be(frame.data());
-        try
-        {
-            Parsed p = parse_payload(frame.data() + 4, payload_len);
-
-            switch (p.type)
-            {
-            case MSG_HELLO:
-                handle_hello_message(c, p, frame, sessions, session_by_fd,
-                                     to_remove);
-                break;
-            case MSG_CHAT:
-                handle_chat_message(c, p, frame, session_by_fd, sessions);
-                break;
-            case MSG_LIST_REQUEST:
-                handle_list_request(c, session_by_fd, sessions);
-                break;
-            case MSG_PUBKEY_REQUEST:
-                handle_pubkey_request(c, p, session_by_fd, sessions);
-                break;
-            default:
-                break;
+    for (auto& client : clients) {
+        if (!FD_ISSET(client.fd, &rfds)) continue;
+        
+        if (!SSL_is_init_finished(client.ssl)) {
+            int ret = SSL_accept(client.ssl);
+            if (ret <= 0) {
+                int err = SSL_get_error(client.ssl, ret);
+                if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
+                    to_remove.push_back(client.fd);
+                }
             }
+            continue;
         }
-        catch (const std::exception &e)
-        {
+        
+        std::vector<unsigned char> frame;
+        if (!recv_full_frame(client, frame)) {
+            int err = SSL_get_error(client.ssl, 0);
+            if (err == SSL_ERROR_ZERO_RETURN || err == SSL_ERROR_SYSCALL) {
+                to_remove.push_back(client.fd);
+            }
+            continue;
+        }
+        
+        uint32_t payload_len = read_u32_be(frame.data());
+        try {
+            Parsed p = parse_payload(frame.data() + 4, payload_len);
+            switch (p.type) {
+                case MSG_HELLO:
+                    handle_hello_message(client, p, frame, sessions, session_by_fd, clients, to_remove);
+                    break;
+                case MSG_CHAT:
+                    handle_chat_message(client, p, frame, session_by_fd, sessions, clients);
+                    break;
+                case MSG_LIST_REQUEST:
+                    handle_list_request(client, session_by_fd, sessions, clients);
+                    break;
+                case MSG_PUBKEY_REQUEST:
+                    handle_pubkey_request(client, p, session_by_fd, sessions, clients);
+                    break;
+                default:
+                    break;
+            }
+        } catch (const std::exception& e) {
             std::cerr << "server parse exception: " << e.what() << "\n";
-            to_remove.push_back(c);
-        }
-        catch (...)
-        {
+            to_remove.push_back(client.fd);
+        } catch (...) {
             std::cerr << "server parse exception: unknown\n";
-            to_remove.push_back(c);
+            to_remove.push_back(client.fd);
         }
     }
+}
+static SSL_CTX* init_tls_context()
+{
+    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
+
+    OSSL_PROVIDER *default_prov = OSSL_PROVIDER_load(nullptr, "default");
+    if (!default_prov) {
+        std::cerr << "Failed to load default provider\n";
+        return nullptr;
+    }
+
+    OSSL_PROVIDER *oqsprov = OSSL_PROVIDER_load(nullptr, "oqsprovider");
+    if (!oqsprov) {
+        std::cerr << "ERROR: Failed to load oqsprovider (ML-KEM768 / ML-DSA-87 missing)!\n";
+        ERR_print_errors_fp(stderr);
+        OSSL_PROVIDER_unload(default_prov);
+        return nullptr;
+    }
+
+    SSL_CTX* ctx = SSL_CTX_new_ex(nullptr, nullptr, TLS_server_method());
+    if (!ctx) {
+        std::cerr << "SSL_CTX_new failed\n";
+        ERR_print_errors_fp(stderr);
+        OSSL_PROVIDER_unload(oqsprov);
+        OSSL_PROVIDER_unload(default_prov);
+        return nullptr;
+    }
+
+    SSL_CTX_set_security_level(ctx, 0);
+    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
+    SSL_CTX_set_ciphersuites(ctx,
+        "TLS_AES_256_GCM_SHA384:"
+        "TLS_CHACHA20_POLY1305_SHA256:"
+        "TLS_AES_128_GCM_SHA256");
+
+    if (SSL_CTX_set1_groups_list(ctx, "X25519MLKEM768:X25519") != 1) {
+        std::cerr << "ERROR: Failed to set X25519MLKEM768\n";
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        OSSL_PROVIDER_unload(oqsprov);
+        OSSL_PROVIDER_unload(default_prov);
+        return nullptr;
+    }
+
+    if (SSL_CTX_use_certificate_chain_file(ctx, "sample/sample_test_cert/server.crt") <= 0 ||
+        SSL_CTX_use_PrivateKey_file(ctx, "sample/sample_test_cert/server.key", SSL_FILETYPE_PEM) <= 0) {
+        std::cerr << "Failed to load server certificate/key\n";
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        OSSL_PROVIDER_unload(oqsprov);
+        OSSL_PROVIDER_unload(default_prov);
+        return nullptr;
+    }
+
+    if (!SSL_CTX_check_private_key(ctx)) {
+        std::cerr << "Server private key does not match certificate\n";
+        SSL_CTX_free(ctx);
+        OSSL_PROVIDER_unload(oqsprov);
+        OSSL_PROVIDER_unload(default_prov);
+        return nullptr;
+    }
+
+    if (SSL_CTX_load_verify_locations(ctx, "sample/sample_test_cert/ca.crt", nullptr) <= 0) {
+        std::cerr << "Failed to load trusted CA bundle for client verification\n";
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        OSSL_PROVIDER_unload(oqsprov);
+        OSSL_PROVIDER_unload(default_prov);
+        return nullptr;
+    }
+
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
+
+    std::cout << "Server TLS ready:\n"
+              << "  Cert: sample/sample_test_cert/server.crt\n"
+              << "  Key:  sample/sample_test_cert/server.key\n"
+              << "  Using trusted CA bundle for client verification\n"
+              << "  Hybrid KEM: X25519MLKEM768\n";
+
+    return ctx;
 }
 
 int main(int argc, char **argv)
 {
-    if (argc < 2)
-    {
+    if (argc < 2) {
         std::cout << "Usage: chat_server <port>\n";
         return 1;
     }
 
-    int port      = std::stoi(argv[1]);
-    int listen_fd = make_listen(port);
-    if (listen_fd < 0)
-        return 1;
+    int port = std::stoi(argv[1]);
 
-    if (set_nonblock(listen_fd) < 0)
-    {
+    int listen_fd = make_listen(port);
+    if (listen_fd < 0) return 1;
+
+    if (set_nonblock(listen_fd) < 0) {
         close(listen_fd);
         return 1;
     }
 
-    std::vector<int>                             clients;
-    std::unordered_map<std::string, SessionData> sessions;
-    std::unordered_map<int, std::string>         session_by_fd;
+    // ──────────────────────────────
+    // Initialize TLS context
+    // ──────────────────────────────
+    SSL_CTX* ctx = init_tls_context();
+    if (!ctx) {
+        std::cerr << "TLS initialization failed - exiting\n";
+        close(listen_fd);
+        return 1;
+    }
 
-    while (true)
-    {
+    std::vector<ClientState> clients;
+    std::unordered_map<std::string, SessionData> sessions;
+    std::unordered_map<int, std::string> session_by_fd;
+
+    std::cout << "Server listening on port " << port << " with post-quantum TLS\n";
+
+    while (true) {
         prune_invalid_clients(clients);
 
         fd_set rfds;
-        int    maxfd = prepare_select(rfds, listen_fd, clients);
+        int maxfd = prepare_select(rfds, listen_fd, clients);
 
         timeval tv{0, 200000};
-        int     r = select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
-        if (r < 0)
-        {
+        int r = select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
+        if (r < 0) {
             perror("select");
             break;
         }
 
-        if (FD_ISSET(listen_fd, &rfds))
-        {
-            accept_new_client(listen_fd, clients);
+        if (FD_ISSET(listen_fd, &rfds)) {
+            accept_new_client(listen_fd, clients, ctx);
         }
 
         std::vector<int> to_remove;
-        process_client_events(rfds, clients, sessions, session_by_fd,
-                              to_remove);
+        process_client_events(rfds, clients, sessions, session_by_fd, to_remove);
 
-        for (int c : to_remove)
-        {
-            cleanup_disconnected_client(c, clients, session_by_fd, sessions);
+        for (int fd : to_remove) {
+            cleanup_disconnected_client(fd, clients, session_by_fd, sessions);
         }
     }
+
+    // Cleanup
+    clients.clear();
+    SSL_CTX_free(ctx);
+
+    // Note: In real production code you might want to unload providers only at the very end
+    // For development it's usually fine to leave them loaded
+    // OSSL_PROVIDER_unload(...) can be called here if desired
 
     close(listen_fd);
     return 0;
 }
+

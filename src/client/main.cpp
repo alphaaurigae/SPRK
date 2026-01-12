@@ -24,6 +24,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/provider.h> 
+#include <csignal>
 
 struct PeerInfo
 {
@@ -77,6 +81,28 @@ inline std::atomic_bool is_connected{false};
 } // namespace
 // NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
 
+inline SSL_CTX* ssl_ctx = nullptr;
+inline SSL* ssl = nullptr;
+inline std::mutex ssl_io_mtx;
+
+
+
+inline bool init_oqs_provider()
+{
+    static OSSL_PROVIDER *oqsprov = nullptr;
+    if (!oqsprov)
+    {
+        oqsprov = OSSL_PROVIDER_load(nullptr, "oqsprovider");
+        if (!oqsprov)
+        {
+            std::cerr << "Failed to load oqsprovider\n";
+            ERR_print_errors_fp(stderr);
+            return false;
+        }
+    }
+    return true;
+}
+
 inline void dev_print(std::string_view s)
 {
     if (debug_mode)
@@ -125,7 +151,58 @@ inline bool is_valid_username(std::string_view name) noexcept
                name.begin(), name.end(), [](unsigned char c) noexcept
                { return (std::isalnum(c) != 0) || c == '_' || c == '-'; });
 }
+static SSL_CTX* init_tls_client_context(const std::string& client_cert_path,
+                                        const std::string& client_key_path)
+{
+    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
 
+    SSL_CTX* ctx = SSL_CTX_new_ex(nullptr, nullptr, TLS_client_method());
+    if (!ctx) {
+        ERR_print_errors_fp(stderr);
+        return nullptr;
+    }
+
+    SSL_CTX_set_security_level(ctx, 0);
+    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
+    SSL_CTX_set_ciphersuites(ctx,
+        "TLS_AES_256_GCM_SHA384:"
+        "TLS_CHACHA20_POLY1305_SHA256:"
+        "TLS_AES_128_GCM_SHA256");
+
+    if (SSL_CTX_set1_groups_list(ctx, "X25519MLKEM768:X25519") != 1) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return nullptr;
+    }
+
+    // User-supplied TLS client certificate + key
+    if (SSL_CTX_use_certificate_file(ctx, client_cert_path.c_str(), SSL_FILETYPE_PEM) <= 0 ||
+        SSL_CTX_use_PrivateKey_file(ctx, client_key_path.c_str(), SSL_FILETYPE_PEM) <= 0) {
+        std::cerr << "Failed to load user-supplied client cert/key:\n"
+                  << "  cert: " << client_cert_path << "\n"
+                  << "  key:  " << client_key_path << "\n";
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return nullptr;
+    }
+
+    // Hardcoded trusted CA bundle for server verification
+    if (SSL_CTX_load_verify_locations(ctx, "sample/sample_test_cert/ca.crt", nullptr) <= 0) {
+        std::cerr << "Failed to load trusted CA bundle for server verification\n";
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return nullptr;
+    }
+
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+
+    std::cout << "Client TLS ready (user-supplied):\n"
+              << "  Cert: " << client_cert_path << "\n"
+              << "  Key:  " << client_key_path << "\n"
+              << "  Using trusted CA bundle for server\n"
+              << "  Hybrid KEM: X25519MLKEM768\n";
+    return ctx;
+}
 inline bool is_valid_session_id(std::string_view sid) noexcept
 {
     if (sid.size() != SESSION_ID_LENGTH)
@@ -185,48 +262,6 @@ struct AlgorithmName
 {
     std::string value;
 };
-
-inline PQKeypair load_pqsig_keypair(const KeyPath       &path,
-                                    const AlgorithmName &oqs_alg)
-{
-#ifdef USE_LIBOQS
-    auto     data = read_file_raw(path.value);
-    OQS_SIG *sig  = OQS_SIG_new(oqs_alg.value.c_str());
-    if (sig == nullptr)
-        throw std::runtime_error("pqsig new failed");
-    const size_t sk_len = sig->length_secret_key;
-    const size_t pk_len = sig->length_public_key;
-    OQS_SIG_free(sig);
-
-    if (data.size() == sk_len)
-    {
-        PQKeypair kp;
-        kp.sk.assign(data.begin(), data.end());
-        return kp;
-    }
-    if (data.size() == sk_len + pk_len)
-    {
-        PQKeypair kp;
-        kp.sk.assign(data.begin(),
-                     data.begin() + static_cast<std::ptrdiff_t>(sk_len));
-        kp.pk.assign(data.begin() + static_cast<std::ptrdiff_t>(sk_len),
-                     data.end());
-        return kp;
-    }
-    if (data.size() == pk_len)
-    {
-        PQKeypair kp;
-        kp.pk.assign(data.begin(), data.end());
-        return kp;
-    }
-    throw std::runtime_error("unexpected key file size for algorithm " +
-                             oqs_alg.value);
-#else
-    (void)path;
-    (void)oqs_alg;
-    throw std::runtime_error("liboqs not enabled at build");
-#endif
-}
 
 struct SessionId
 {
@@ -303,7 +338,7 @@ static bool check_rate_limit(PeerInfo &pi) noexcept
     return ++pi.rate_limit_counter <= RATE_LIMIT_MSGS;
 }
 
-static void rotate_ephemeral_if_needed(int sock, const std::string &peer_fp)
+static void rotate_ephemeral_if_needed([[maybe_unused]] int sock, const std::string &peer_fp)
 {
     bool do_rotate = false;
     {
@@ -342,7 +377,7 @@ static void rotate_ephemeral_if_needed(int sock, const std::string &peer_fp)
         std::vector<unsigned char>(new_pk.begin(), new_pk.end()), ALGO_MLDSA87,
         identity_pk_vec, signature_vec, empty_encaps, session_id);
 
-    full_send(sock, hello_frame.data(), hello_frame.size());
+    tls_full_send(ssl, hello_frame.data(), hello_frame.size());
 
     {
         const std::lock_guard<std::mutex> lk(peers_mtx);
@@ -421,16 +456,27 @@ static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
 
 static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
                                         const std::string &key_context,
-                                        int sock, const std::string &peer_name,
-                                        int64_t ms)
-{
-    try
-    {
+                                        [[maybe_unused]] int sock, const std::string &peer_name,
+                                        int64_t ms) {
+    try {
+        // Recompute locally (safe and simple – no need to pass extra param)
+        std::string peer_fp_hex = fingerprint_to_hex(
+            fingerprint_sha256(std::vector<unsigned char>(
+                pi.identity_pk.begin(), pi.identity_pk.end())));
+
+        bool initiator = my_fp_hex < peer_fp_hex;
+
+        dev_println(">>> INITIATOR SENDING ENCAPS! my=" + my_username + " peer=" + peer_name 
+                    + " initiator=" + std::to_string(initiator) 
+                    + " already_sent=" + std::to_string(pi.sent_hello));
+
+        // Fixed: proper function call syntax (no stray ... and no extra comma)
         const auto enc_pair = pqkem_encaps(
             "Kyber512",
             std::vector<unsigned char>(pi.eph_pk.begin(), pi.eph_pk.end()));
+
         const std::vector<unsigned char> encaps_ct = enc_pair.first;
-        const secure_vector              shared    = enc_pair.second;
+        const secure_vector shared = enc_pair.second;
 
         pi.sk = derive_shared_key_from_secret(shared, key_context);
         dev_println("[" + std::to_string(ms) +
@@ -460,7 +506,10 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
             std::vector<unsigned char>(my_eph_pk.begin(), my_eph_pk.end()),
             ALGO_MLDSA87, identity_pk_vec, signature_vec, encaps_ct,
             p.session_id);
-        full_send(sock, reply.data(), reply.size());
+        {
+            std::lock_guard<std::mutex> lk(ssl_io_mtx);
+            tls_full_send(ssl, reply.data(), reply.size());
+        }
         pi.sent_hello = true;
         return true;
     }
@@ -676,95 +725,58 @@ void log_ready_if_new(const PeerInfo &pi, const std::string &peer_name,
 void handle_hello(const Parsed &p, int sock)
 {
     const std::string peer_name = trim(p.username);
-    const auto        ms        = now_ms();
-
-    if (!validate_username(peer_name, ms))
-    {
-        return;
-    }
-
+    const auto ms = now_ms();
+    if (!validate_username(peer_name, ms)) return;
+    
     const std::lock_guard<std::mutex> lk(peers_mtx);
-
-    std::string       peer_fp_hex;
+    std::string peer_fp_hex;
     const std::string peer_key = compute_peer_key(p, peer_fp_hex);
-
-    auto &pi      = peers[peer_key];
+    auto &pi = peers[peer_key];
     auto &fps_set = fps_by_username[peer_name];
     update_peer_info(pi, peer_name, peer_fp_hex, fps_set);
-
-    if (!check_peer_limits(peer_key, ms))
-    {
-        return;
-    }
-
-    if (!check_rate_and_signature(pi, p, peer_name, ms))
-    {
-        return;
-    }
-
-    bool       pk_changed     = false;
-    bool       has_new_encaps = false;
-    const bool needs_key_handling =
-        detect_key_changes(pi, p, pk_changed, has_new_encaps);
-
-    if (!needs_key_handling)
-    {
-        return;
-    }
-
-    dev_println("[" + std::to_string(ms) +
-                "] DEBUG: had_eph_pk=" + (!pi.eph_pk.empty() ? "1" : "0") +
-                " pk_changed=" + (pk_changed ? "1" : "0") + " peer=" +
-                peer_name + " encaps_empty=" + (p.encaps.empty() ? "1" : "0") +
-                " has_new_encaps=" + (has_new_encaps ? "1" : "0"));
-
-    if (pk_changed)
-    {
-        handle_rekey(pi, peer_name, ms);
-    }
-
+    
+    if (!check_peer_limits(peer_key, ms)) return;
+    if (!check_rate_and_signature(pi, p, peer_name, ms)) return;
+    
+    bool pk_changed = false;
+    bool has_new_encaps = false;
+    const bool needs_key_handling = detect_key_changes(pi, p, pk_changed, has_new_encaps);
+    
+    if (pk_changed) handle_rekey(pi, peer_name, ms);
+    
+    if (!needs_key_handling && pi.ready) return;
+    
     update_keys_and_log_connect(pi, p, peer_name, ms);
-
+    
     ExpectedLengths expected{};
-    if (!get_expected_lengths(expected, ms))
-    {
-        return;
-    }
-
-    if (!validate_eph_pk_length(p, expected.pk_len, peer_name, ms))
-    {
-        return;
-    }
-
-    const std::string key_context =
-        build_key_context_for_peer(peer_fp_hex, peer_name);
-    const bool initiator = my_fp_hex < peer_fp_hex;
-
+    if (!get_expected_lengths(expected, ms)) return;
+    if (!validate_eph_pk_length(p, expected.pk_len, peer_name, ms)) return;
+    
+    const std::string key_context = build_key_context_for_peer(peer_fp_hex, peer_name);
     const bool was_ready = pi.ready;
-
-    bool success = true;
-    if (!p.encaps.empty())
-    {
-        success = handle_encaps_present(pi, p, expected.ct_len, key_context,
-                                        peer_name, ms);
-    }
-    else if (initiator && pi.sk.key.empty() && !pi.sent_hello)
-    {
-        success = handle_initiator_no_encaps(pi, p, expected.pk_len,
-                                             key_context, sock, peer_name, ms);
-    }
-    else
-    {
+    const bool i_am_initiator = !peer_fp_hex.empty() && (my_fp_hex < peer_fp_hex);
+    
+    if (!p.encaps.empty()) {
+        if (handle_encaps_present(pi, p, expected.ct_len, key_context, peer_name, ms)) {
+            if (!was_ready && pi.ready) {
+                std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
+                const std::vector<unsigned char> req{PROTO_VERSION, MSG_LIST_REQUEST};
+                const auto frame = build_frame(req);
+                std::lock_guard<std::mutex> lk(ssl_io_mtx);
+                tls_full_send(ssl, frame.data(), frame.size());
+            }
+        }
+    } else if (i_am_initiator && !pi.sent_hello) {
+        if (try_handle_initiator_encaps(pi, p, key_context, sock, peer_name, ms)) {
+            if (!was_ready && pi.ready) {
+                std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
+            }
+        }
+    } else if (!i_am_initiator && p.encaps.empty() && pi.ready) {
+        dev_println("[" + std::to_string(ms) + "] responder confirmed ready for " + peer_name);
+    } else {
         log_awaiting_encaps(peer_name, ms);
-        return;
     }
-
-    if (!success)
-    {
-        return;
-    }
-
-    log_ready_if_new(pi, peer_name, ms, was_ready);
 }
 
 void handle_chat(const Parsed &p)
@@ -989,31 +1001,74 @@ inline void process_pubkey_response(const Parsed &p)
     std::cout << "pubkey " << p.username << " " << hexpk << "\n";
 }
 
-void reader_thread(int sock)
+inline bool tls_read_frame(SSL* ssl, std::vector<unsigned char>& frame_out)
+{
+    unsigned char header[4];
+    size_t total = 0;
+
+    while (total < 4) {
+        ssize_t r = SSL_read(ssl, header + total, 4 - total);
+        if (r <= 0) {
+            int err = SSL_get_error(ssl, static_cast<int>(r));
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            if (err == SSL_ERROR_ZERO_RETURN) {
+                dev_println("[" + std::to_string(now_ms()) + "] peer closed connection cleanly");
+                return false;
+            }
+            dev_println("[" + std::to_string(now_ms()) + "] header read failed, err=" + std::to_string(err));
+            return false;
+        }
+        total += static_cast<size_t>(r);
+    }
+
+    uint32_t payload_len = read_u32_be(header);
+    if (payload_len > 65536 || payload_len < 2) {
+        dev_println("[" + std::to_string(now_ms()) + "] invalid payload len: " + std::to_string(payload_len));
+        return false;
+    }
+
+    frame_out.resize(4 + payload_len);
+    std::memcpy(frame_out.data(), header, 4);
+
+    total = 0;
+    while (total < payload_len) {
+        ssize_t r = SSL_read(ssl, frame_out.data() + 4 + total, payload_len - total);
+        if (r <= 0) {
+            int err = SSL_get_error(ssl, static_cast<int>(r));
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            if (err == SSL_ERROR_ZERO_RETURN) {
+                dev_println("[" + std::to_string(now_ms()) + "] peer closed connection during payload");
+                return false;
+            }
+            dev_println("[" + std::to_string(now_ms()) + "] payload read failed, err=" + std::to_string(err));
+            return false;
+        }
+        total += static_cast<size_t>(r);
+    }
+
+    dev_println("[" + std::to_string(now_ms()) + "] received frame, size=" + std::to_string(frame_out.size()));
+    return true;
+}
+
+
+void reader_thread(int sock, SSL *ssl)
 {
     while (should_reconnect && is_connected)
     {
-        std::array<unsigned char, 4> lenbuf{};
-        const ssize_t                r = recv(sock, lenbuf.data(), 4, MSG_PEEK);
-        if (r <= 0)
-        {
+        if (!ssl || !SSL_is_init_finished(ssl)) {
+            dev_println("[" + std::to_string(now_ms()) + "] SSL not ready in reader thread");
             is_connected = false;
             break;
         }
-        if (r < 4)
-            continue;
-
-        const uint32_t L = read_u32_be(lenbuf.data());
-        if (L > 64 * 1024 || L < 2)
-        {
-            is_connected = false;
-            break;
-        }
-
-        std::vector<unsigned char> frame(4 + L);
-        const ssize_t              got = full_recv(sock, frame.data(), 4 + L);
-        if (got <= 0)
-        {
+        
+        std::vector<unsigned char> frame;
+        if (!tls_read_frame(ssl, frame)) {
             is_connected = false;
             break;
         }
@@ -1021,24 +1076,12 @@ void reader_thread(int sock)
         try
         {
             std::span<const unsigned char> frame_span(frame);
-            const Parsed p = parse_payload(frame_span.subspan(4).data(), L);
+            const Parsed p = parse_payload(frame_span.subspan(4).data(), frame_span.size() - 4);
 
-            if (p.type == MSG_HELLO)
-            {
-                handle_hello(p, sock);
-            }
-            else if (p.type == MSG_CHAT)
-            {
-                handle_chat(p);
-            }
-            else if (p.type == MSG_LIST_RESPONSE)
-            {
-                process_list_response(p);
-            }
-            else if (p.type == MSG_PUBKEY_RESPONSE)
-            {
-                process_pubkey_response(p);
-            }
+            if (p.type == MSG_HELLO) handle_hello(p, sock);
+            else if (p.type == MSG_CHAT) handle_chat(p);
+            else if (p.type == MSG_LIST_RESPONSE) process_list_response(p);
+            else if (p.type == MSG_PUBKEY_RESPONSE) process_pubkey_response(p);
         }
         catch (const std::exception &e)
         {
@@ -1164,7 +1207,8 @@ inline MessageContext prepare_message_context(const std::string &recipient_key)
 }
 
 // Returns true if the line was a command that was fully handled
-inline bool handle_client_command(const std::string &line, int sock)
+inline bool handle_client_command(const std::string &line, 
+                                  [[maybe_unused]] int sock, SSL *ssl)
 {
     if (line == "help")
     {
@@ -1186,9 +1230,14 @@ inline bool handle_client_command(const std::string &line, int sock)
     {
         const std::vector<unsigned char> p{PROTO_VERSION, MSG_LIST_REQUEST};
         const auto                       f = build_frame(p);
-        if (full_send(sock, f.data(), f.size()) <= 0)
         {
-            is_connected = false;
+            std::lock_guard<std::mutex> lk(ssl_io_mtx);
+            if (tls_full_send(ssl, f.data(), f.size()) <= 0)
+            {
+                is_connected = false;
+            }
+        }
+        {
         }
         return true;
     }
@@ -1202,9 +1251,12 @@ inline bool handle_client_command(const std::string &line, int sock)
             return true;
         }
         const auto req = build_pubkey_request(who);
-        if (full_send(sock, req.data(), req.size()) <= 0)
         {
-            is_connected = false;
+            std::lock_guard<std::mutex> lk(ssl_io_mtx);
+            if (tls_full_send(ssl, req.data(), req.size()) <= 0)
+            {
+                is_connected = false;
+            }
         }
         return true;
     }
@@ -1260,7 +1312,8 @@ inline const std::array<unsigned char, 32> &get_my_fingerprint_array()
 
 // "Flawless Victory!"
 inline bool send_message_to_peer(int sock, const std::string &msg,
-                                 const RecipientFP &recipient_fp)
+                                 const RecipientFP &recipient_fp, SSL *ssl)
+
 {
     rotate_ephemeral_if_needed(sock, recipient_fp.value);
 
@@ -1281,10 +1334,13 @@ inline bool send_message_to_peer(int sock, const std::string &msg,
         build_chat(ctx.target_username, my_username, get_my_fingerprint_array(),
                    ctx.seq, nonce, ct);
 
-    if (full_send(sock, frame.data(), frame.size()) <= 0)
     {
-        is_connected = false;
-        return false;
+        std::lock_guard<std::mutex> lk(ssl_io_mtx);
+        if (tls_full_send(ssl, frame.data(), frame.size()) <= 0)
+        {
+            is_connected = false;
+            return false;
+        }
     }
 
     {
@@ -1302,15 +1358,43 @@ inline bool send_message_to_peer(int sock, const std::string &msg,
 }
 
 // "I am the fire to your ice.", "I do what I must to return home."
-void writer_thread(int sock)
+
+
+
+void writer_thread(int sock, SSL *ssl)
 {
     std::string line;
-    while (std::getline(std::cin, line) && is_connected)
+    bool eof_notified = false;
+
+    while (is_connected.load(std::memory_order_acquire))
     {
-        if (handle_client_command(line, sock))
+        if (!std::getline(std::cin, line))
+        {
+            if (std::cin.eof())
+            {
+                if (!eof_notified)
+                {
+                    std::cerr << "[" << now_ms() << "] writer_thread: stdin EOF; entering poll mode\n";
+                    eof_notified = true;
+                }
+                std::cin.clear();
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+
+            std::cerr << "[" << now_ms() << "] writer_thread: std::getline failed\n";
+            is_connected.store(false, std::memory_order_release);
+            break;
+        }
+
+        eof_notified = false;
+
+        if (!is_connected.load(std::memory_order_acquire)) break;
+
+        if (handle_client_command(line, sock, ssl))
             continue;
 
-        const size_t pos = line.find(' ');
+        const std::size_t pos = line.find(' ');
         if (pos == std::string::npos)
         {
             std::cout << "usage: <recipient> <message>\n";
@@ -1327,8 +1411,7 @@ void writer_thread(int sock)
         }
 
         const auto recipients = parse_recipient_list(to);
-        const auto resolved_recipients =
-            resolve_fingerprint_recipients(recipients);
+        const auto resolved_recipients = resolve_fingerprint_recipients(recipients);
         const auto ready_recipients = get_ready_recipients(resolved_recipients);
 
         if (ready_recipients.empty())
@@ -1339,15 +1422,21 @@ void writer_thread(int sock)
 
         for (const auto &r : ready_recipients)
         {
-            if (!send_message_to_peer(sock, msg, RecipientFP{r}))
+            if (!send_message_to_peer(sock, msg, RecipientFP{r}, ssl))
             {
+                int err = SSL_get_error(ssl, 0);
+                if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+                    dev_println("[" + std::to_string(now_ms()) + "] send would block, retrying...");
+                    continue;  // temporary, try next loop iteration
+                }
+                std::cerr << "[" << now_ms() << "] send failed (err=" << err << ") - peer/server likely dropped connection\n";
+                is_connected.store(false, std::memory_order_release);
                 break;
             }
         }
     }
 
-    should_reconnect = false;
-    close(sock);
+    // Do not close the socket here. Let main/connection loop perform orderly shutdown.
 }
 
 // --- 1. Command line parsing ---
@@ -1356,6 +1445,8 @@ struct ConnectionConfig
     std::string server;
     int         port{};
     std::string username;
+    std::string client_cert_path;
+    std::string client_key_path;
 };
 
 inline ConnectionConfig parse_command_line_args(std::span<char *> args)
@@ -1365,6 +1456,7 @@ inline ConnectionConfig parse_command_line_args(std::span<char *> args)
         std::cout << "Usage: chat_client <server_ip> <server_port> <username> "
                      "<private_key_path> [--sessionid <id>] [--debug]\n\n"
                      "Runtime commands:\n"
+                     "help                      show commands\n"
                      "q                         quit\n"
                      "list | list users         list connected users\n"
                      "pubk <username>           fetch user public key\n"
@@ -1405,38 +1497,80 @@ inline ConnectionConfig parse_command_line_args(std::span<char *> args)
 }
 
 // --- 2. Identity key loading ---
-inline bool load_identity_keys(const char *key_path)
-{
-    try
-    {
-#ifdef USE_LIBOQS
-        const auto kp =
-            load_pqsig_keypair(KeyPath{key_path}, AlgorithmName{"ML-DSA-87"});
-        if (kp.sk.empty())
-        {
-            throw std::runtime_error("identity secret key missing in file");
-        }
-
-        my_identity_sk = secure_vector(kp.sk.begin(), kp.sk.end());
-
-        if (kp.pk.empty())
-        {
-            throw std::runtime_error("identity public key not present; provide "
-                                     "file containing sk||pk");
-        }
-
-        my_identity_pk = secure_vector(kp.pk.begin(), kp.pk.end());
-        const auto fp  = fingerprint_sha256(std::vector<unsigned char>(
-            my_identity_pk.begin(), my_identity_pk.end()));
-        my_fp_hex      = fingerprint_to_hex(fp);
-
-        return true;
-#else
-        throw std::runtime_error("liboqs not enabled at build");
-#endif
+// Helper: Load PEM private key and extract raw sk + pk for protocol use
+inline bool load_pem_private_key(const std::string& path,
+                                 secure_vector& out_sk,
+                                 secure_vector& out_pk) {
+    FILE* fp = fopen(path.c_str(), "r");
+    if (!fp) {
+        std::cerr << "Cannot open PEM file: " << path << "\n";
+        return false;
     }
-    catch (const std::exception &e)
-    {
+
+    EVP_PKEY* pkey = PEM_read_PrivateKey(fp, nullptr, nullptr, nullptr);
+    fclose(fp);
+
+    if (!pkey) {
+        std::cerr << "Failed to read PEM private key from " << path << "\n";
+        ERR_print_errors_fp(stderr);
+        return false;
+    }
+
+    // Extract raw secret key bytes (ML-DSA-87 secret key)
+    size_t sk_len = 0;
+    if (EVP_PKEY_get_raw_private_key(pkey, nullptr, &sk_len) <= 0) {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+    std::vector<unsigned char> raw_sk(sk_len);
+    if (EVP_PKEY_get_raw_private_key(pkey, raw_sk.data(), &sk_len) <= 0) {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+    out_sk.assign(raw_sk.begin(), raw_sk.end());
+
+    // Extract raw public key bytes
+    size_t pk_len = 0;
+    if (EVP_PKEY_get_raw_public_key(pkey, nullptr, &pk_len) <= 0) {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+    std::vector<unsigned char> raw_pk(pk_len);
+    if (EVP_PKEY_get_raw_public_key(pkey, raw_pk.data(), &pk_len) <= 0) {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+    out_pk.assign(raw_pk.begin(), raw_pk.end());
+
+    EVP_PKEY_free(pkey);
+    return true;
+}
+
+// --- 2. Identity key loading (PEM version only) ---
+inline bool load_identity_keys(const char* key_path) {
+    try {
+        secure_vector raw_sk, raw_pk;
+        if (!load_pem_private_key(key_path, raw_sk, raw_pk)) {
+            return false;
+        }
+
+        if (raw_sk.empty()) {
+            throw std::runtime_error("identity secret key missing");
+        }
+        my_identity_sk = std::move(raw_sk);
+
+        if (raw_pk.empty()) {
+            throw std::runtime_error("identity public key not present");
+        }
+        my_identity_pk = std::move(raw_pk);
+
+        const auto fp = fingerprint_sha256(std::vector<unsigned char>(
+            my_identity_pk.begin(), my_identity_pk.end()));
+        my_fp_hex = fingerprint_to_hex(fp);
+
+        std::cout << "Loaded PEM identity key: " << key_path << "\n";
+        return true;
+    } catch (const std::exception& e) {
         std::cout << "Failed to load private/public key: " << e.what() << "\n";
         return false;
     }
@@ -1445,20 +1579,26 @@ inline bool load_identity_keys(const char *key_path)
 // --- 3. Session ID handling ---
 inline bool setup_session_id(std::span<char *> args)
 {
-    if (args.size() >= 7 && std::string_view(args[5]) == "--sessionid")
-    {
-        session_id = args[6];
-        if (!is_valid_session_id(session_id))
-        {
-            std::cout << "Invalid session_id format\n";
-            return false;
+    std::string_view session_flag = "--sessionid";
+    std::string_view alt_flag = "-sessionid";
+
+    for (size_t i = 1; i < args.size() - 1; ++i) {  // -1 because we need next arg
+        std::string_view arg = args[i];
+
+        if (arg == session_flag || arg == alt_flag) {
+            session_id = args[i + 1];
+            if (!is_valid_session_id(session_id)) {
+                std::cout << "Invalid session_id format\n";
+                return false;
+            }
+            std::cout << "Using provided session: " << session_id << "\n";
+            return true;
         }
     }
-    else
-    {
-        session_id = generate_session_id();
-        std::cout << "Created session: " << session_id << "\n";
-    }
+
+    // Fallback: generate new
+    session_id = generate_session_id();
+    std::cout << "Created session: " << session_id << "\n";
     return true;
 }
 
@@ -1480,66 +1620,202 @@ inline int attempt_connection(const std::string &server, int port,
     my_eph_pk = persisted_eph_pk;
     my_eph_sk = persisted_eph_sk;
 
-    const int s = connect_to(server, port);
+    int s = connect_to(server, port);
     if (s < 0)
     {
         std::cout << "[" << now_ms() << "] connection failed\n";
         return -1;
     }
 
-    // Sign ephemeral PK + session_id
-    std::vector<unsigned char> sig_data;
-    sig_data.reserve(my_eph_pk.size() + session_id.size());
-    sig_data.insert(sig_data.end(), my_eph_pk.begin(), my_eph_pk.end());
-    sig_data.insert(sig_data.end(), session_id.begin(), session_id.end());
-
-    const auto signature =
-        pqsig_sign("ML-DSA-87",
-                   std::vector<unsigned char>(my_identity_sk.begin(),
-                                              my_identity_sk.end()),
-                   sig_data);
-
-    const auto hello_frame = build_hello(
-        my_username, ALGO_KYBER512,
-        std::vector<unsigned char>(my_eph_pk.begin(), my_eph_pk.end()),
-        ALGO_MLDSA87,
-        std::vector<unsigned char>(my_identity_pk.begin(),
-                                   my_identity_pk.end()),
-        signature, std::vector<unsigned char>{}, session_id);
-
-    if (full_send(s, hello_frame.data(), hello_frame.size()) <= 0)
+    SSL* new_ssl = SSL_new(ssl_ctx);
+    if (!new_ssl)
     {
+        std::cerr << "SSL_new failed\n";
+        ERR_print_errors_fp(stderr);
         close(s);
         return -1;
     }
 
-    return s;
+    SSL_set_fd(new_ssl, s);
+
+    int ret = SSL_connect(new_ssl);
+    if (ret <= 0)
+    {
+        int err = SSL_get_error(new_ssl, ret);
+        std::cerr << "SSL_connect failed (err=" << err << ")\n";
+        ERR_print_errors_fp(stderr);
+        SSL_free(new_ssl);
+        close(s);
+        return -1;
+    }
+
+    std::cout << "[" << now_ms() << "] TLS handshake successful\n";
+    {
+        std::lock_guard<std::mutex> lk(ssl_io_mtx);
+        if (ssl)
+        {
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+        }
+        ssl = new_ssl;
+    }
+
+      std::vector<unsigned char> sig_data;
+      sig_data.reserve(my_eph_pk.size() + session_id.size());
+      sig_data.insert(sig_data.end(), my_eph_pk.begin(), my_eph_pk.end());
+      sig_data.insert(sig_data.end(), session_id.begin(), session_id.end());
+
+      const auto signature =
+          pqsig_sign("ML-DSA-87",
+                     std::vector<unsigned char>(my_identity_sk.begin(),
+                                                my_identity_sk.end()),
+                     sig_data);
+
+      const auto hello_frame = build_hello(
+          my_username, ALGO_KYBER512,
+          std::vector<unsigned char>(my_eph_pk.begin(), my_eph_pk.end()),
+          ALGO_MLDSA87,
+          std::vector<unsigned char>(my_identity_pk.begin(),
+                                     my_identity_pk.end()),
+          signature, std::vector<unsigned char>{}, session_id);
+
+      {
+          std::lock_guard<std::mutex> lk(ssl_io_mtx);
+          if (tls_full_send(ssl, hello_frame.data(), hello_frame.size()) <= 0)
+          {
+              std::cout << "[" << now_ms() << "] failed to send hello\n";
+              SSL_free(ssl);
+              ssl = nullptr;
+              close(s);
+              return -1;
+          }
+      }
+
+      return s;
 }
 
 int main(int argc, char **argv) noexcept
 try
 {
+      const std::span args(argv, static_cast<std::size_t>(argc));
 
-    const std::span args(argv, static_cast<std::size_t>(argc));
+      const auto config = parse_command_line_args(args);
+      my_username       = config.username;
 
-    const auto config = parse_command_line_args(args);
-    my_username       = config.username;
+      std::signal(SIGPIPE, SIG_IGN);
 
-    if (!load_identity_keys(args[4]))
-    {
-        return 1;
+      if (!load_identity_keys(args[4]))
+      {
+          return 1;
+      }
+
+      if (!setup_session_id(args))
+      {
+          return 1;
+      }
+
+      if (args.size() < 6)
+      {
+          std::cout << "Usage: chat_client <server_ip> <server_port> <username> "
+                       "<identity_sk.pem> <client_cert.crt> "
+                       "[--sessionid <id>] [--debug]\n";
+          return 1;
+      }
+
+      std::string client_key_path  = args[4];
+      std::string client_cert_path = args[5];
+
+      crypto_init();
+
+      if (!init_oqs_provider())
+      {
+          std::cerr << "Cannot continue without OQS provider\n";
+          return 1;
+      }
+
+      OSSL_PROVIDER *default_prov = OSSL_PROVIDER_load(nullptr, "default");
+      if (!default_prov)
+      {
+          std::cerr << "Failed to load default provider\n";
+          return 1;
+      }
+
+      OSSL_PROVIDER *oqs_prov = OSSL_PROVIDER_load(nullptr, "oqsprovider");
+      if (!oqs_prov)
+      {
+          std::cerr << "Failed to load oqsprovider\n";
+          OSSL_PROVIDER_unload(default_prov);
+          return 1;
+      }
+
+      ssl_ctx = SSL_CTX_new_ex(nullptr, nullptr, TLS_client_method());
+      if (!ssl_ctx)
+      {
+          std::cerr << "SSL_CTX_new failed\n";
+          ERR_print_errors_fp(stderr);
+          OSSL_PROVIDER_unload(oqs_prov);
+          OSSL_PROVIDER_unload(default_prov);
+          return 1;
+      }
+
+      SSL_CTX_set_security_level(ssl_ctx, 0);
+      SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);
+      SSL_CTX_set_ciphersuites(ssl_ctx,
+                               "TLS_AES_256_GCM_SHA384:"
+                               "TLS_CHACHA20_POLY1305_SHA256:"
+                               "TLS_AES_128_GCM_SHA256");
+
+      if (SSL_CTX_set1_groups_list(ssl_ctx, "X25519MLKEM768:X25519") != 1)
+      {
+          std::cerr << "Failed to set KEM groups\n";
+          ERR_print_errors_fp(stderr);
+          SSL_CTX_free(ssl_ctx);
+          ssl_ctx = nullptr;
+          OSSL_PROVIDER_unload(oqs_prov);
+          OSSL_PROVIDER_unload(default_prov);
+          return 1;
+      }
+
+      std::string cert_path =
+          std::string("sample/sample_test_cert/") + my_username + ".crt";
+      std::string key_path =
+          std::string("sample/sample_test_cert/") + my_username + "_tls.key";
+
+      if (SSL_CTX_use_certificate_file(ssl_ctx, cert_path.c_str(),
+                                       SSL_FILETYPE_PEM) <= 0 ||
+          SSL_CTX_use_PrivateKey_file(ssl_ctx, key_path.c_str(),
+                                      SSL_FILETYPE_PEM) <= 0)
+      {
+          std::cerr << "Failed to load client cert/key\n";
+          ERR_print_errors_fp(stderr);
+          SSL_CTX_free(ssl_ctx);
+          ssl_ctx = nullptr;
+          OSSL_PROVIDER_unload(oqs_prov);
+          OSSL_PROVIDER_unload(default_prov);
+          return 1;
+      }
+
+      if (SSL_CTX_load_verify_locations(
+              ssl_ctx, "sample/sample_test_cert/ca.crt", nullptr) <= 0)
+      {
+          std::cerr << "Failed to load server CA\n";
+          SSL_CTX_free(ssl_ctx);
+          ssl_ctx = nullptr;
+          OSSL_PROVIDER_unload(oqs_prov);
+          OSSL_PROVIDER_unload(default_prov);
+        return -1;
     }
 
-    if (!setup_session_id(args))
-    {
-        return 1;
-    }
+      SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
 
-    crypto_init();
+      std::cout << "Client TLS context ready\n"
+                << "  Cert: " << cert_path << "\n"
+                << "  Key:  " << key_path << "\n"
+                << "  Hybrid KEM: X25519MLKEM768\n";
 
     secure_vector persisted_eph_pk;
     secure_vector persisted_eph_sk;
-    bool          have_persisted_eph = false;
+      bool          have_persisted_eph = false;
 
     uint32_t reconnect_attempts = 0;
 
@@ -1555,26 +1831,43 @@ try
             std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
         }
 
-        const int s =
-            attempt_connection(config.server, config.port, persisted_eph_pk,
-                               persisted_eph_sk, have_persisted_eph);
-        if (s < 0)
-        {
+          const int s =
+              attempt_connection(config.server, config.port, persisted_eph_pk,
+                                 persisted_eph_sk, have_persisted_eph);
+        if (s < 0) {
             ++reconnect_attempts;
             continue;
         }
 
         is_connected       = true;
         reconnect_attempts = 0;
-        std::cout << "[" << now_ms() << "] connected\n";
+       // std::cout << "[" << now_ms() << "] re-connected (session resumed)\n";  // optional, clearer
+       // Or completely remove/silence it to avoid spam
 
-        std::thread reader(reader_thread, s);
-        std::thread writer(writer_thread, s);
+        std::thread reader(reader_thread, s, ssl);
+        std::thread writer(writer_thread, s, ssl);
 
         writer.join();
         reader.join();
 
-        close(s);
+          {
+              std::lock_guard<std::mutex> lk(ssl_io_mtx);
+              if (ssl)
+              {
+                  if (SSL_is_init_finished(ssl))
+                  {
+                      SSL_shutdown(ssl);
+                }
+                  SSL_free(ssl);
+                  ssl = nullptr;
+            }
+
+        }
+
+          if (close(s) != 0)
+          {
+            std::cerr << "[" << now_ms() << "] Socket close failed: " << strerror(errno) << "\n";
+        }
 
         {
             const std::lock_guard<std::mutex> lk(peers_mtx);
@@ -1582,6 +1875,7 @@ try
             {
                 kv.second.ready      = false;
                 kv.second.sent_hello = false;
+                kv.second.sk.key.clear();
             }
         }
     }
@@ -1590,6 +1884,15 @@ try
     {
         std::cout << "[" << now_ms() << "] max reconnection attempts reached\n";
     }
+
+      if (ssl_ctx)
+      {
+        SSL_CTX_free(ssl_ctx);
+        ssl_ctx = nullptr;
+    }
+
+    OSSL_PROVIDER_unload(default_prov);
+    OSSL_PROVIDER_unload(oqs_prov);
 
     return 0;
 }

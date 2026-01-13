@@ -1,6 +1,7 @@
-#pragma once
+#ifndef COMMON_CRYPTO_H
+#define COMMON_CRYPTO_H
 
-#include "util.h"
+#include "common_util.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -795,3 +796,4 @@ pqkem_keypair_from_seed(std::string_view alg, const secure_vector& seed)
     throw std::runtime_error("pqkem not enabled at build");
 #endif
 }
+#endif

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef NET_TLS_CONTEXT_H
+#define NET_TLS_CONTEXT_H
 
 #include <openssl/err.h>
 #include <openssl/provider.h>
@@ -152,3 +153,4 @@ struct TLSContextConfig {
     std::string_view cert, std::string_view key, std::string_view ca) noexcept {
     return init_tls_context({cert, key, ca, false, true});
 }
+#endif

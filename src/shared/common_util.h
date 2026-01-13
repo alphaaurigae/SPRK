@@ -1,5 +1,5 @@
-#ifndef UTIL_H
-#define UTIL_H
+#ifndef COMMON_UTIL_H
+#define COMMON_UTIL_H
 #include <array>
 #include <cctype>
 #include <cerrno>

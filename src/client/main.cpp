@@ -1,7 +1,7 @@
-#include "crypto.h"
-#include "protocol.h"
-#include "util.h"
-#include "tls_context.h"
+#include "common_crypto.h"
+#include "net_common_protocol.h"
+#include "common_util.h"
+#include "net_tls_context.h"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>

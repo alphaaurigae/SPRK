@@ -1,5 +1,5 @@
-#ifndef PROTOCOL_H
-#define PROTOCOL_H
+#ifndef NET_COMMON_PROTOCOL_H
+#define NET_COMMON_PROTOCOL_H
 
 #include <array>
 #include <cstdint>
@@ -466,4 +466,4 @@ inline Parsed parse_payload(const unsigned char* payload, size_t payload_len)
     return parse_payload(std::span<const unsigned char>(payload, payload_len));
 }
 
-#endif // PROTOCOL_H
+#endif

@@ -2,6 +2,9 @@
 #include "net_common_protocol.h"
 #include "common_util.h"
 #include "net_tls_context.h"
+#include "net_socket_util.h"
+#include "net_username_util.h"
+#include "net_rekey_util.h"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cstring>
@@ -63,77 +66,6 @@ private:
     }
 };
 
-
-int make_listen(int port)
-{
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0)
-    {
-        perror("socket");
-        return -1;
-    }
-
-    int one = 1;
-    if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0)
-    {
-        close(s);
-        perror("setsockopt SO_REUSEADDR");
-        return -1;
-    }
-#ifdef SO_REUSEPORT
-    setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
-#endif
-
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-    int flags = fcntl(s, F_GETFD);
-    if (flags >= 0)
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-        fcntl(s, F_SETFD, flags | FD_CLOEXEC);
-
-    sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port        = htons(static_cast<uint16_t>(port));
-
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
-    if (bind(s, (sockaddr *)&addr, sizeof(addr)) != 0)
-    {
-        perror("bind");
-        close(s);
-        return -1;
-    }
-
-    if (listen(s, 16) != 0)
-    {
-        perror("listen");
-        close(s);
-        return -1;
-    }
-
-    return s;
-}
-
-int set_nonblock(int fd)
-{
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0)
-        return -1;
-
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-        return -1;
-
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-    int f2 = fcntl(fd, F_GETFD);
-    if (f2 >= 0)
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-        fcntl(fd, F_SETFD, f2 | FD_CLOEXEC);
-
-    return 0;
-}
-
-
 inline bool accept_new_client(int listen_fd, std::vector<ClientState>& clients, SSL_CTX* ctx) {
     int c = accept(listen_fd, nullptr, nullptr);
     if (c < 0) return false;
@@ -142,7 +74,7 @@ inline bool accept_new_client(int listen_fd, std::vector<ClientState>& clients, 
         return true;
     }
     
-    if (set_nonblock(c) != 0) {
+    if (set_socket_nonblocking(c) != 0) {
         close(c);
         return true;
     }
@@ -171,60 +103,7 @@ struct SessionData {
     std::unordered_map<std::string, std::vector<unsigned char>> hello_message_by_fingerprint;
 };
 
-static int lcs_len(const std::string &a, const std::string &b)
-{
-    size_t           n = a.size();
-    size_t           m = b.size();
-    std::vector<int> prev(m + 1, 0);
-    std::vector<int> cur(m + 1, 0);
 
-    for (size_t i = 1; i <= n; ++i)
-    {
-        for (size_t j = 1; j <= m; ++j)
-        {
-            if (a[i - 1] == b[j - 1])
-                cur[j] = prev[j - 1] + 1;
-            else
-                cur[j] = std::max(prev[j], cur[j - 1]);
-        }
-        prev.swap(cur);
-        std::fill(cur.begin(), cur.end(), 0);
-    }
-    return prev[m];
-}
-
-static bool
-too_similar_username(const std::string                          &u,
-                     const std::unordered_map<std::string, int> &existing)
-{
-    return std::ranges::any_of(
-        existing,
-        [&u](const auto &kv)
-        {
-            const std::string &e      = kv.first;
-            int                l      = lcs_len(u, e);
-            size_t             maxlen = std::max(u.size(), e.size());
-            return maxlen > 0 && (100 * l) >= (85 * static_cast<int>(maxlen));
-        });
-}
-
-
-inline bool recv_full_frame(const ClientState& client, std::vector<unsigned char>& frame) {
-    std::array<unsigned char, 4> lenbuf{};
-    ssize_t n = SSL_peek(client.ssl, lenbuf.data(), lenbuf.size());
-
-    if (n < static_cast<ssize_t>(lenbuf.size())) {
-        int err = SSL_get_error(client.ssl, n);
-        return (n < 0 && (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE));
-    }
-
-    uint32_t payload_len = read_u32_be(lenbuf.data());
-    if (payload_len > 64 * 1024) return false;
-
-    frame.resize(4 + payload_len);
-    ssize_t got = tls_full_recv(client.ssl, frame.data(), frame.size());
-    return got > 0;
-}
 
 inline void cleanup_disconnected_client(
     int client_fd,
@@ -364,7 +243,7 @@ static bool check_username_conflicts(SessionData &sd, const std::string &uname,
     }
 
     // Similar username, but not the same client re-connecting
-    if (too_similar_username(uname, sd.fd_by_nick) &&
+    if (has_similar_username(uname, sd.fd_by_nick, 85) &&
         (it_existing == sd.fd_by_nick.end() ||
          it_existing->second != client_fd))
     {
@@ -670,7 +549,7 @@ static void process_client_events(const fd_set& rfds,
         }
         
         std::vector<unsigned char> frame;
-        if (!recv_full_frame(client, frame)) {
+        if (!tls_peek_and_read_frame(client.ssl, frame)) {
             int err = SSL_get_error(client.ssl, 0);
             if (err == SSL_ERROR_ZERO_RETURN || err == SSL_ERROR_SYSCALL) {
                 to_remove.push_back(client.fd);
@@ -717,10 +596,10 @@ int main(int argc, char **argv)
 
     int port = std::stoi(argv[1]);
 
-    int listen_fd = make_listen(port);
+    const int listen_fd = make_listen_socket(port);
     if (listen_fd < 0) return 1;
 
-    if (set_nonblock(listen_fd) < 0) {
+    if (set_socket_nonblocking(listen_fd) < 0) {
         close(listen_fd);
         return 1;
     }

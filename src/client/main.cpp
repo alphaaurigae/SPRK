@@ -2,6 +2,9 @@
 #include "net_common_protocol.h"
 #include "common_util.h"
 #include "net_tls_context.h"
+#include "net_socket_util.h"
+#include "net_username_util.h"
+#include "net_rekey_util.h"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
@@ -49,18 +52,18 @@ struct PeerInfo
 };
 
 static constexpr uint32_t REKEY_INTERVAL         = 1024;
-static constexpr uint32_t MAX_SEQ_GAP            = 100;
-static constexpr uint64_t MESSAGE_TIMEOUT_MS     = 60000;
+
+
 static constexpr size_t   MAX_PEERS              = 256;
-static constexpr size_t   MAX_USERNAME_LEN       = 64;
+
 static constexpr uint32_t RATE_LIMIT_MSGS        = 100;
 static constexpr uint64_t RATE_LIMIT_WINDOW_MS   = 1000;
-static constexpr uint32_t SEQ_JITTER_BUFFER      = 3;
+
 static constexpr uint32_t MAX_RECONNECT_ATTEMPTS = 10;
 static constexpr uint64_t INITIAL_BACKOFF_MS     = 1000;
 static constexpr uint64_t MAX_BACKOFF_MS         = 60000;
 static constexpr size_t   MIN_FP_PREFIX_HEX      = 16;
-static constexpr size_t   SESSION_ID_LENGTH      = 60;
+
 
 // NOLINTBEGIN(cppcoreguidelines-avoid-non-const-global-variables)
 namespace
@@ -116,13 +119,6 @@ inline void dev_println(std::string_view s)
         std::cout << s << "\n";
 }
 
-inline uint64_t now_ms() noexcept
-{
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
-
 inline std::string format_hhmmss(uint64_t ms)
 {
     const auto t = static_cast<std::time_t>(ms / 1000);
@@ -133,49 +129,7 @@ inline std::string format_hhmmss(uint64_t ms)
 }
 
 
-inline bool is_valid_username(std::string_view name) noexcept
-{
-    return !name.empty() && name.size() <= MAX_USERNAME_LEN &&
-           std::all_of(
-               name.begin(), name.end(), [](unsigned char c) noexcept
-               { return (std::isalnum(c) != 0) || c == '_' || c == '-'; });
-}
 
-inline bool is_valid_session_id(std::string_view sid) noexcept
-{
-    if (sid.size() != SESSION_ID_LENGTH)
-        return false;
-    constexpr std::string_view base58_chars =
-        "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    return std::all_of(
-        sid.begin(), sid.end(), [&](char c) noexcept
-        { return base58_chars.find(c) != std::string_view::npos; });
-}
-
-inline std::string generate_session_id()
-{
-    constexpr std::string_view base58_chars =
-        "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    constexpr size_t       CHARSET          = base58_chars.size();
-    constexpr unsigned int REJECT_THRESHOLD = 256U / CHARSET * CHARSET;
-    std::string            sid;
-    sid.reserve(SESSION_ID_LENGTH);
-    unsigned char b = 0;
-    for (size_t i = 0; i < SESSION_ID_LENGTH; ++i)
-    {
-        while (true)
-        {
-            if (RAND_bytes(&b, 1) != 1)
-                throw std::runtime_error("RAND_bytes failed");
-            if (static_cast<unsigned int>(b) < REJECT_THRESHOLD)
-            {
-                sid += base58_chars[static_cast<unsigned int>(b) % CHARSET];
-                break;
-            }
-        }
-    }
-    return sid;
-}
 
 struct PQKeypair
 {
@@ -239,41 +193,14 @@ inline PQKeypair derive_ephemeral_for_peer(const secure_vector &identity_sk,
 #endif
 }
 
-int connect_to(const std::string &host, int port)
-{
-    const int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0)
-        return -1;
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(static_cast<uint16_t>(port));
-
-    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1)
-    {
-        close(s);
-        return -1;
-    }
-
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    if (connect(s, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
-    {
-        close(s);
-        return -1;
-    }
-
-    return s;
-}
-
 static bool check_rate_limit(PeerInfo &pi) noexcept
 {
-    const uint64_t now = now_ms();
-    if (now - pi.rate_limit_window_start > RATE_LIMIT_WINDOW_MS)
-    {
-        pi.rate_limit_counter      = 0;
-        pi.rate_limit_window_start = now;
-    }
-    return ++pi.rate_limit_counter <= RATE_LIMIT_MSGS;
+    RateLimitState state{pi.rate_limit_counter, pi.rate_limit_window_start};
+    const bool allowed = check_rate_limit(state, get_current_timestamp_ms(), 
+                                          RATE_LIMIT_MSGS, RATE_LIMIT_WINDOW_MS);
+    pi.rate_limit_counter = state.counter;
+    pi.rate_limit_window_start = state.window_start_ms;
+    return allowed;
 }
 
 static void rotate_ephemeral_if_needed([[maybe_unused]] int sock, const std::string &peer_fp)
@@ -282,7 +209,8 @@ static void rotate_ephemeral_if_needed([[maybe_unused]] int sock, const std::str
     {
         const std::lock_guard<std::mutex> lk(peers_mtx);
         const auto                        it = peers.find(peer_fp);
-        if (it != peers.end() && it->second.send_seq >= REKEY_INTERVAL)
+        if (it != peers.end() && should_rekey(it->second.send_seq, REKEY_INTERVAL))
+
         {
             do_rotate = true;
         }
@@ -290,7 +218,7 @@ static void rotate_ephemeral_if_needed([[maybe_unused]] int sock, const std::str
     if (!do_rotate)
         return;
 
-    const auto ms = now_ms();
+    const auto ms = get_current_timestamp_ms();
 
     auto          eph_pair = pqkem_keypair("Kyber512");
     secure_vector new_pk   = eph_pair.first;
@@ -356,13 +284,9 @@ static std::string
 build_key_context_for_peer(const std::string &peer_fp_hex_ref,
                            const std::string &peer_name)
 {
-    if (!my_fp_hex.empty() && !peer_fp_hex_ref.empty())
-        return (my_fp_hex < peer_fp_hex_ref)
-                   ? (my_fp_hex + "|" + peer_fp_hex_ref)
-                   : (peer_fp_hex_ref + "|" + my_fp_hex);
-
-    return (my_username < peer_name) ? (my_username + "|" + peer_name)
-                                     : (peer_name + "|" + my_username);
+    return !my_fp_hex.empty() && !peer_fp_hex_ref.empty()
+        ? build_key_derivation_context(my_fp_hex, peer_fp_hex_ref)
+        : build_username_context(my_username, peer_name);
 }
 
 static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
@@ -663,7 +587,7 @@ void log_ready_if_new(const PeerInfo &pi, const std::string &peer_name,
 void handle_hello(const Parsed &p, int sock)
 {
     const std::string peer_name = trim(p.username);
-    const auto ms = now_ms();
+    const auto ms = get_current_timestamp_ms();
     if (!validate_username(peer_name, ms)) return;
     
     const std::lock_guard<std::mutex> lk(peers_mtx);
@@ -720,7 +644,7 @@ void handle_hello(const Parsed &p, int sock)
 void handle_chat(const Parsed &p)
 {
     const std::string peer_from = trim(p.from);
-    const auto        ms        = now_ms();
+    const auto        ms        = get_current_timestamp_ms();
 
     if (!is_valid_username(peer_from)) [[unlikely]]
     {
@@ -766,14 +690,14 @@ void handle_chat(const Parsed &p)
         return;
     }
 
-    if (pi.last_recv_time > 0 && (ms - pi.last_recv_time) > MESSAGE_TIMEOUT_MS)
-        [[unlikely]]
+if (is_message_timeout_exceeded(pi.last_recv_time, ms, DEFAULT_MESSAGE_TIMEOUT_MS))
+    [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] WARNING: large time gap from " + peer_from);
     }
 
-    if (p.seq < pi.recv_seq) [[unlikely]]
+    if (is_replay_attack(p.seq, pi.recv_seq)) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: replay attack from " + peer_from +
@@ -782,7 +706,7 @@ void handle_chat(const Parsed &p)
         return;
     }
 
-    if (p.seq - pi.recv_seq > MAX_SEQ_GAP + SEQ_JITTER_BUFFER) [[unlikely]]
+if (!is_sequence_gap_valid(p.seq, pi.recv_seq, DEFAULT_MAX_SEQ_GAP, DEFAULT_SEQ_JITTER_BUFFER)) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: seq gap too large from " + peer_from +
@@ -791,8 +715,8 @@ void handle_chat(const Parsed &p)
         return;
     }
 
-    const bool jitter_detected =
-        p.seq > pi.recv_seq && p.seq - pi.recv_seq <= SEQ_JITTER_BUFFER;
+const bool jitter_detected = is_sequence_in_jitter_range(p.seq, pi.recv_seq,
+                                                          DEFAULT_SEQ_JITTER_BUFFER);
     const bool seq_mismatch = p.seq != pi.recv_seq;
 
     if (jitter_detected) [[unlikely]]
@@ -867,8 +791,6 @@ void handle_chat(const Parsed &p)
     }
 }
 
-// === Helper functions (placed BEFORE reader_thread in the .cpp file) ===
-
 inline std::string get_fingerprint_for_user(const std::string &username)
 {
     const auto itset = fps_by_username.find(username);
@@ -939,74 +861,14 @@ inline void process_pubkey_response(const Parsed &p)
     std::cout << "pubkey " << p.username << " " << hexpk << "\n";
 }
 
-inline bool tls_read_frame(SSL* ssl, std::vector<unsigned char>& frame_out)
-{
-    unsigned char header[4];
-    size_t total = 0;
-
-    while (total < 4) {
-        ssize_t r = SSL_read(ssl, header + total, 4 - total);
-        if (r <= 0) {
-            int err = SSL_get_error(ssl, static_cast<int>(r));
-            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-            if (err == SSL_ERROR_ZERO_RETURN) {
-                dev_println("[" + std::to_string(now_ms()) + "] peer closed connection cleanly");
-                return false;
-            }
-            dev_println("[" + std::to_string(now_ms()) + "] header read failed, err=" + std::to_string(err));
-            return false;
-        }
-        total += static_cast<size_t>(r);
-    }
-
-    uint32_t payload_len = read_u32_be(header);
-    if (payload_len > 65536 || payload_len < 2) {
-        dev_println("[" + std::to_string(now_ms()) + "] invalid payload len: " + std::to_string(payload_len));
-        return false;
-    }
-
-    frame_out.resize(4 + payload_len);
-    std::memcpy(frame_out.data(), header, 4);
-
-    total = 0;
-    while (total < payload_len) {
-        ssize_t r = SSL_read(ssl, frame_out.data() + 4 + total, payload_len - total);
-        if (r <= 0) {
-            int err = SSL_get_error(ssl, static_cast<int>(r));
-            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-            if (err == SSL_ERROR_ZERO_RETURN) {
-                dev_println("[" + std::to_string(now_ms()) + "] peer closed connection during payload");
-                return false;
-            }
-            dev_println("[" + std::to_string(now_ms()) + "] payload read failed, err=" + std::to_string(err));
-            return false;
-        }
-        total += static_cast<size_t>(r);
-    }
-
-    dev_println("[" + std::to_string(now_ms()) + "] received frame, size=" + std::to_string(frame_out.size()));
-    return true;
-}
-
-
 void reader_thread(int sock, SSL *ssl)
 {
     while (should_reconnect && is_connected)
     {
-        if (!ssl || !SSL_is_init_finished(ssl)) {
-            dev_println("[" + std::to_string(now_ms()) + "] SSL not ready in reader thread");
-            is_connected = false;
-            break;
-        }
         
         std::vector<unsigned char> frame;
-        if (!tls_read_frame(ssl, frame)) {
+        if (!tls_read_full_frame(ssl, frame))
+        {
             is_connected = false;
             break;
         }
@@ -1285,10 +1147,10 @@ inline bool send_message_to_peer(int sock, const std::string &msg,
         const std::lock_guard<std::mutex> lk(peers_mtx);
         auto                             &pi = peers[recipient_fp.value];
         pi.send_seq++;
-        pi.last_send_time = now_ms();
+        pi.last_send_time = get_current_timestamp_ms();
     }
 
-    const std::string ts = format_hhmmss(now_ms());
+    const std::string ts = format_hhmmss(get_current_timestamp_ms());
     std::cout << "[" << ts << "] [" << ctx.target_username << " " << ctx.shortfp
               << "] \"" << msg << "\"\n";
 
@@ -1296,9 +1158,6 @@ inline bool send_message_to_peer(int sock, const std::string &msg,
 }
 
 // "I am the fire to your ice.", "I do what I must to return home."
-
-
-
 void writer_thread(int sock, SSL *ssl)
 {
     std::string line;
@@ -1312,7 +1171,7 @@ void writer_thread(int sock, SSL *ssl)
             {
                 if (!eof_notified)
                 {
-                    std::cerr << "[" << now_ms() << "] writer_thread: stdin EOF; entering poll mode\n";
+                    std::cerr << "[" << get_current_timestamp_ms() << "] writer_thread: stdin EOF; entering poll mode\n";
                     eof_notified = true;
                 }
                 std::cin.clear();
@@ -1320,7 +1179,7 @@ void writer_thread(int sock, SSL *ssl)
                 continue;
             }
 
-            std::cerr << "[" << now_ms() << "] writer_thread: std::getline failed\n";
+            std::cerr << "[" << get_current_timestamp_ms() << "] writer_thread: std::getline failed\n";
             is_connected.store(false, std::memory_order_release);
             break;
         }
@@ -1364,10 +1223,10 @@ void writer_thread(int sock, SSL *ssl)
             {
                 int err = SSL_get_error(ssl, 0);
                 if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-                    dev_println("[" + std::to_string(now_ms()) + "] send would block, retrying...");
+                    dev_println("[" + std::to_string(get_current_timestamp_ms()) + "] send would block, retrying...");
                     continue;  // temporary, try next loop iteration
                 }
-                std::cerr << "[" << now_ms() << "] send failed (err=" << err << ") - peer/server likely dropped connection\n";
+                std::cerr << "[" << get_current_timestamp_ms() << "] send failed (err=" << err << ") - peer/server likely dropped connection\n";
                 is_connected.store(false, std::memory_order_release);
                 break;
             }
@@ -1555,10 +1414,10 @@ inline int attempt_connection(const std::string &server, int port,
     my_eph_pk = persisted_eph_pk;
     my_eph_sk = persisted_eph_sk;
 
-    int s = connect_to(server, port);
+    const int s = connect_to_host(server.c_str(), port);
     if (s < 0)
     {
-        std::cout << "[" << now_ms() << "] connection failed\n";
+        std::cout << "[" << get_current_timestamp_ms() << "] connection failed\n";
         return -1;
     }
 
@@ -1584,7 +1443,7 @@ inline int attempt_connection(const std::string &server, int port,
         return -1;
     }
 
-    std::cout << "[" << now_ms() << "] TLS handshake successful\n";
+    std::cout << "[" << get_current_timestamp_ms() << "] TLS handshake successful\n";
     {
         std::lock_guard<std::mutex> lk(ssl_io_mtx);
         if (ssl)
@@ -1618,7 +1477,7 @@ inline int attempt_connection(const std::string &server, int port,
           std::lock_guard<std::mutex> lk(ssl_io_mtx);
           if (tls_full_send(ssl, hello_frame.data(), hello_frame.size()) <= 0)
           {
-              std::cout << "[" << now_ms() << "] failed to send hello\n";
+              std::cout << "[" << get_current_timestamp_ms() << "] failed to send hello\n";
               SSL_free(ssl);
               ssl = nullptr;
               close(s);
@@ -1692,7 +1551,7 @@ try
             const uint64_t backoff = std::min<uint64_t>(
                 INITIAL_BACKOFF_MS * (1ULL << (reconnect_attempts - 1)),
                 MAX_BACKOFF_MS);
-            std::cout << "[" << now_ms() << "] reconnecting in " << backoff
+            std::cout << "[" << get_current_timestamp_ms() << "] reconnecting in " << backoff
                       << "ms (attempt " << reconnect_attempts + 1 << ")\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
         }
@@ -1728,7 +1587,7 @@ try
 
         if (close(s) != 0)
         {
-            std::cerr << "[" << now_ms() << "] Socket close failed: " << strerror(errno) << "\n";
+            std::cerr << "[" << get_current_timestamp_ms() << "] Socket close failed: " << strerror(errno) << "\n";
         }
 
         {
@@ -1744,7 +1603,7 @@ try
 
     if (reconnect_attempts >= MAX_RECONNECT_ATTEMPTS)
     {
-        std::cout << "[" << now_ms() << "] max reconnection attempts reached\n";
+        std::cout << "[" << get_current_timestamp_ms() << "] max reconnection attempts reached\n";
     }
 
     if (ssl_ctx) {

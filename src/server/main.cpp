@@ -1,6 +1,7 @@
 #include "crypto.h"
 #include "protocol.h"
 #include "util.h"
+#include "tls_context.h"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cstring>
@@ -712,86 +713,7 @@ static void process_client_events(const fd_set& rfds,
         }
     }
 }
-static SSL_CTX* init_tls_context()
-{
-    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
 
-    OSSL_PROVIDER *default_prov = OSSL_PROVIDER_load(nullptr, "default");
-    if (!default_prov) {
-        std::cerr << "Failed to load default provider\n";
-        return nullptr;
-    }
-
-    OSSL_PROVIDER *oqsprov = OSSL_PROVIDER_load(nullptr, "oqsprovider");
-    if (!oqsprov) {
-        std::cerr << "ERROR: Failed to load oqsprovider (ML-KEM768 / ML-DSA-87 missing)!\n";
-        ERR_print_errors_fp(stderr);
-        OSSL_PROVIDER_unload(default_prov);
-        return nullptr;
-    }
-
-    SSL_CTX* ctx = SSL_CTX_new_ex(nullptr, nullptr, TLS_server_method());
-    if (!ctx) {
-        std::cerr << "SSL_CTX_new failed\n";
-        ERR_print_errors_fp(stderr);
-        OSSL_PROVIDER_unload(oqsprov);
-        OSSL_PROVIDER_unload(default_prov);
-        return nullptr;
-    }
-
-    SSL_CTX_set_security_level(ctx, 0);
-    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
-    SSL_CTX_set_ciphersuites(ctx,
-        "TLS_AES_256_GCM_SHA384:"
-        "TLS_CHACHA20_POLY1305_SHA256:"
-        "TLS_AES_128_GCM_SHA256");
-
-    if (SSL_CTX_set1_groups_list(ctx, "X25519MLKEM768:X25519") != 1) {
-        std::cerr << "ERROR: Failed to set X25519MLKEM768\n";
-        ERR_print_errors_fp(stderr);
-        SSL_CTX_free(ctx);
-        OSSL_PROVIDER_unload(oqsprov);
-        OSSL_PROVIDER_unload(default_prov);
-        return nullptr;
-    }
-
-    if (SSL_CTX_use_certificate_chain_file(ctx, "sample/sample_test_cert/server.crt") <= 0 ||
-        SSL_CTX_use_PrivateKey_file(ctx, "sample/sample_test_cert/server.key", SSL_FILETYPE_PEM) <= 0) {
-        std::cerr << "Failed to load server certificate/key\n";
-        ERR_print_errors_fp(stderr);
-        SSL_CTX_free(ctx);
-        OSSL_PROVIDER_unload(oqsprov);
-        OSSL_PROVIDER_unload(default_prov);
-        return nullptr;
-    }
-
-    if (!SSL_CTX_check_private_key(ctx)) {
-        std::cerr << "Server private key does not match certificate\n";
-        SSL_CTX_free(ctx);
-        OSSL_PROVIDER_unload(oqsprov);
-        OSSL_PROVIDER_unload(default_prov);
-        return nullptr;
-    }
-
-    if (SSL_CTX_load_verify_locations(ctx, "sample/sample_test_cert/ca.crt", nullptr) <= 0) {
-        std::cerr << "Failed to load trusted CA bundle for client verification\n";
-        ERR_print_errors_fp(stderr);
-        SSL_CTX_free(ctx);
-        OSSL_PROVIDER_unload(oqsprov);
-        OSSL_PROVIDER_unload(default_prov);
-        return nullptr;
-    }
-
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
-
-    std::cout << "Server TLS ready:\n"
-              << "  Cert: sample/sample_test_cert/server.crt\n"
-              << "  Key:  sample/sample_test_cert/server.key\n"
-              << "  Using trusted CA bundle for client verification\n"
-              << "  Hybrid KEM: X25519MLKEM768\n";
-
-    return ctx;
-}
 
 int main(int argc, char **argv)
 {
@@ -813,7 +735,11 @@ int main(int argc, char **argv)
     // ──────────────────────────────
     // Initialize TLS context
     // ──────────────────────────────
-    SSL_CTX* ctx = init_tls_context();
+    SSL_CTX* ctx = init_tls_server_context(
+        "sample/sample_test_cert/server.crt",
+        "sample/sample_test_cert/server.key",
+        "sample/sample_test_cert/ca.crt");
+    
     if (!ctx) {
         std::cerr << "TLS initialization failed - exiting\n";
         close(listen_fd);
@@ -854,10 +780,6 @@ int main(int argc, char **argv)
     // Cleanup
     clients.clear();
     SSL_CTX_free(ctx);
-
-    // Note: In real production code you might want to unload providers only at the very end
-    // For development it's usually fine to leave them loaded
-    // OSSL_PROVIDER_unload(...) can be called here if desired
 
     close(listen_fd);
     return 0;

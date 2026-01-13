@@ -1,6 +1,7 @@
 #include "crypto.h"
 #include "protocol.h"
 #include "util.h"
+#include "tls_context.h"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
@@ -151,58 +152,7 @@ inline bool is_valid_username(std::string_view name) noexcept
                name.begin(), name.end(), [](unsigned char c) noexcept
                { return (std::isalnum(c) != 0) || c == '_' || c == '-'; });
 }
-static SSL_CTX* init_tls_client_context(const std::string& client_cert_path,
-                                        const std::string& client_key_path)
-{
-    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
 
-    SSL_CTX* ctx = SSL_CTX_new_ex(nullptr, nullptr, TLS_client_method());
-    if (!ctx) {
-        ERR_print_errors_fp(stderr);
-        return nullptr;
-    }
-
-    SSL_CTX_set_security_level(ctx, 0);
-    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
-    SSL_CTX_set_ciphersuites(ctx,
-        "TLS_AES_256_GCM_SHA384:"
-        "TLS_CHACHA20_POLY1305_SHA256:"
-        "TLS_AES_128_GCM_SHA256");
-
-    if (SSL_CTX_set1_groups_list(ctx, "X25519MLKEM768:X25519") != 1) {
-        ERR_print_errors_fp(stderr);
-        SSL_CTX_free(ctx);
-        return nullptr;
-    }
-
-    // User-supplied TLS client certificate + key
-    if (SSL_CTX_use_certificate_file(ctx, client_cert_path.c_str(), SSL_FILETYPE_PEM) <= 0 ||
-        SSL_CTX_use_PrivateKey_file(ctx, client_key_path.c_str(), SSL_FILETYPE_PEM) <= 0) {
-        std::cerr << "Failed to load user-supplied client cert/key:\n"
-                  << "  cert: " << client_cert_path << "\n"
-                  << "  key:  " << client_key_path << "\n";
-        ERR_print_errors_fp(stderr);
-        SSL_CTX_free(ctx);
-        return nullptr;
-    }
-
-    // Hardcoded trusted CA bundle for server verification
-    if (SSL_CTX_load_verify_locations(ctx, "sample/sample_test_cert/ca.crt", nullptr) <= 0) {
-        std::cerr << "Failed to load trusted CA bundle for server verification\n";
-        ERR_print_errors_fp(stderr);
-        SSL_CTX_free(ctx);
-        return nullptr;
-    }
-
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
-
-    std::cout << "Client TLS ready (user-supplied):\n"
-              << "  Cert: " << client_cert_path << "\n"
-              << "  Key:  " << client_key_path << "\n"
-              << "  Using trusted CA bundle for server\n"
-              << "  Hybrid KEM: X25519MLKEM768\n";
-    return ctx;
-}
 inline bool is_valid_session_id(std::string_view sid) noexcept
 {
     if (sid.size() != SESSION_ID_LENGTH)
@@ -1554,12 +1504,9 @@ inline bool load_identity_keys(const char* key_path) {
             return false;
         }
 
-        if (raw_sk.empty()) {
-            throw std::runtime_error("identity secret key missing");
-        }
-        my_identity_sk = std::move(raw_sk);
-
-        if (raw_pk.empty()) {
+    my_identity_sk = std::move(raw_sk);
+    
+    if (raw_pk.empty()) {
             throw std::runtime_error("identity public key not present");
         }
         my_identity_pk = std::move(raw_pk);
@@ -1697,125 +1644,56 @@ inline int attempt_connection(const std::string &server, int port,
 int main(int argc, char **argv) noexcept
 try
 {
-      const std::span args(argv, static_cast<std::size_t>(argc));
+    const std::span args(argv, static_cast<std::size_t>(argc));
 
-      const auto config = parse_command_line_args(args);
-      my_username       = config.username;
+    const auto config = parse_command_line_args(args);
+    my_username       = config.username;
 
-      std::signal(SIGPIPE, SIG_IGN);
+    std::signal(SIGPIPE, SIG_IGN);
 
-      if (!load_identity_keys(args[4]))
-      {
-          return 1;
-      }
-
-      if (!setup_session_id(args))
-      {
-          return 1;
-      }
-
-      if (args.size() < 6)
-      {
-          std::cout << "Usage: chat_client <server_ip> <server_port> <username> "
-                       "<identity_sk.pem> <client_cert.crt> "
-                       "[--sessionid <id>] [--debug]\n";
-          return 1;
-      }
-
-      std::string client_key_path  = args[4];
-      std::string client_cert_path = args[5];
-
-      crypto_init();
-
-      if (!init_oqs_provider())
-      {
-          std::cerr << "Cannot continue without OQS provider\n";
-          return 1;
-      }
-
-      OSSL_PROVIDER *default_prov = OSSL_PROVIDER_load(nullptr, "default");
-      if (!default_prov)
-      {
-          std::cerr << "Failed to load default provider\n";
-          return 1;
-      }
-
-      OSSL_PROVIDER *oqs_prov = OSSL_PROVIDER_load(nullptr, "oqsprovider");
-      if (!oqs_prov)
-      {
-          std::cerr << "Failed to load oqsprovider\n";
-          OSSL_PROVIDER_unload(default_prov);
-          return 1;
-      }
-
-      ssl_ctx = SSL_CTX_new_ex(nullptr, nullptr, TLS_client_method());
-      if (!ssl_ctx)
-      {
-          std::cerr << "SSL_CTX_new failed\n";
-          ERR_print_errors_fp(stderr);
-          OSSL_PROVIDER_unload(oqs_prov);
-          OSSL_PROVIDER_unload(default_prov);
-          return 1;
-      }
-
-      SSL_CTX_set_security_level(ssl_ctx, 0);
-      SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);
-      SSL_CTX_set_ciphersuites(ssl_ctx,
-                               "TLS_AES_256_GCM_SHA384:"
-                               "TLS_CHACHA20_POLY1305_SHA256:"
-                               "TLS_AES_128_GCM_SHA256");
-
-      if (SSL_CTX_set1_groups_list(ssl_ctx, "X25519MLKEM768:X25519") != 1)
-      {
-          std::cerr << "Failed to set KEM groups\n";
-          ERR_print_errors_fp(stderr);
-          SSL_CTX_free(ssl_ctx);
-          ssl_ctx = nullptr;
-          OSSL_PROVIDER_unload(oqs_prov);
-          OSSL_PROVIDER_unload(default_prov);
-          return 1;
-      }
-
-      std::string cert_path =
-          std::string("sample/sample_test_cert/") + my_username + ".crt";
-      std::string key_path =
-          std::string("sample/sample_test_cert/") + my_username + "_tls.key";
-
-      if (SSL_CTX_use_certificate_file(ssl_ctx, cert_path.c_str(),
-                                       SSL_FILETYPE_PEM) <= 0 ||
-          SSL_CTX_use_PrivateKey_file(ssl_ctx, key_path.c_str(),
-                                      SSL_FILETYPE_PEM) <= 0)
-      {
-          std::cerr << "Failed to load client cert/key\n";
-          ERR_print_errors_fp(stderr);
-          SSL_CTX_free(ssl_ctx);
-          ssl_ctx = nullptr;
-          OSSL_PROVIDER_unload(oqs_prov);
-          OSSL_PROVIDER_unload(default_prov);
-          return 1;
-      }
-
-      if (SSL_CTX_load_verify_locations(
-              ssl_ctx, "sample/sample_test_cert/ca.crt", nullptr) <= 0)
-      {
-          std::cerr << "Failed to load server CA\n";
-          SSL_CTX_free(ssl_ctx);
-          ssl_ctx = nullptr;
-          OSSL_PROVIDER_unload(oqs_prov);
-          OSSL_PROVIDER_unload(default_prov);
-        return -1;
+    if (!load_identity_keys(args[4]))
+    {
+        return 1;
     }
 
-      SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
+    if (!setup_session_id(args))
+    {
+        return 1;
+    }
 
-      std::cout << "Client TLS context ready\n"
-                << "  Cert: " << cert_path << "\n"
-                << "  Key:  " << key_path << "\n"
-                << "  Hybrid KEM: X25519MLKEM768\n";
+    if (args.size() < 6)
+    {
+        std::cout << "Usage: chat_client <server_ip> <server_port> <username> "
+                     "<identity_sk.pem> <client_cert.crt> "
+                     "[--sessionid <id>] [--debug]\n";
+        return 1;
+    }
+
+    crypto_init();
+
+    // ────────────────────────────────────────────────────────
+    // Initialize TLS context (this also loads OQS providers)
+    // ────────────────────────────────────────────────────────
+    std::string cert_path = std::string("sample/sample_test_cert/") + my_username + ".crt";
+    std::string key_path  = std::string("sample/sample_test_cert/") + my_username + "_tls.key";
+    
+    ssl_ctx = init_tls_client_context(cert_path, key_path, "sample/sample_test_cert/ca.crt");
+    if (!ssl_ctx) {
+        std::cerr << "TLS context initialization failed\n";
+        return 1;
+    }
+
+    // Load OQS provider for protocol-level crypto (separate from TLS)
+    if (!init_oqs_provider()) {
+        std::cerr << "Cannot continue without OQS provider for protocol crypto\n";
+        SSL_CTX_free(ssl_ctx);
+        ssl_ctx = nullptr;
+        return 1;
+    }
 
     secure_vector persisted_eph_pk;
     secure_vector persisted_eph_sk;
-      bool          have_persisted_eph = false;
+    bool          have_persisted_eph = false;
 
     uint32_t reconnect_attempts = 0;
 
@@ -1831,9 +1709,8 @@ try
             std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
         }
 
-          const int s =
-              attempt_connection(config.server, config.port, persisted_eph_pk,
-                                 persisted_eph_sk, have_persisted_eph);
+        const int s = attempt_connection(config.server, config.port, persisted_eph_pk,
+                                         persisted_eph_sk, have_persisted_eph);
         if (s < 0) {
             ++reconnect_attempts;
             continue;
@@ -1841,8 +1718,6 @@ try
 
         is_connected       = true;
         reconnect_attempts = 0;
-       // std::cout << "[" << now_ms() << "] re-connected (session resumed)\n";  // optional, clearer
-       // Or completely remove/silence it to avoid spam
 
         std::thread reader(reader_thread, s, ssl);
         std::thread writer(writer_thread, s, ssl);
@@ -1850,22 +1725,21 @@ try
         writer.join();
         reader.join();
 
-          {
-              std::lock_guard<std::mutex> lk(ssl_io_mtx);
-              if (ssl)
-              {
-                  if (SSL_is_init_finished(ssl))
-                  {
-                      SSL_shutdown(ssl);
+        {
+            std::lock_guard<std::mutex> lk(ssl_io_mtx);
+            if (ssl)
+            {
+                if (SSL_is_init_finished(ssl))
+                {
+                    SSL_shutdown(ssl);
                 }
-                  SSL_free(ssl);
-                  ssl = nullptr;
+                SSL_free(ssl);
+                ssl = nullptr;
             }
-
         }
 
-          if (close(s) != 0)
-          {
+        if (close(s) != 0)
+        {
             std::cerr << "[" << now_ms() << "] Socket close failed: " << strerror(errno) << "\n";
         }
 
@@ -1885,14 +1759,10 @@ try
         std::cout << "[" << now_ms() << "] max reconnection attempts reached\n";
     }
 
-      if (ssl_ctx)
-      {
+    if (ssl_ctx) {
         SSL_CTX_free(ssl_ctx);
         ssl_ctx = nullptr;
     }
-
-    OSSL_PROVIDER_unload(default_prov);
-    OSSL_PROVIDER_unload(oqs_prov);
 
     return 0;
 }

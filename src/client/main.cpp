@@ -132,18 +132,6 @@ inline std::string format_hhmmss(uint64_t ms)
     return std::format("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec);
 }
 
-inline std::string trim(std::string s)
-{
-    const auto is_space = [](unsigned char c) noexcept -> bool
-    { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [&](unsigned char c)
-                                    { return !is_space(c); }));
-    s.erase(std::find_if(s.rbegin(), s.rend(),
-                         [&](unsigned char c) { return !is_space(c); })
-                .base(),
-            s.end());
-    return s;
-}
 
 inline bool is_valid_username(std::string_view name) noexcept
 {

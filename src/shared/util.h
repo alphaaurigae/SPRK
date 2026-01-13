@@ -5,6 +5,9 @@
 #include <cerrno>
 #include <cstdint>
 #include <span>
+#include <ranges>
+#include <array>
+#include <cctype>
 #include <stdexcept>
 #include <string>
 #include <sys/select.h>
@@ -179,5 +182,21 @@ inline ssize_t tls_full_send(SSL* ssl, const void* buf, size_t len) {
         total += got;
     }
     return total;
+}
+
+inline std::string trim(std::string s)
+{
+    const auto is_space = [](unsigned char c) noexcept {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    };
+
+    s.erase(s.begin(),
+            std::ranges::find_if(s, [&](unsigned char c) { return !is_space(c); }));
+
+    s.erase(std::ranges::find_if(s | std::views::reverse,
+                                 [&](unsigned char c) { return !is_space(c); }).base(),
+            s.end());
+
+    return s;
 }
 #endif

@@ -159,13 +159,6 @@ inline bool accept_new_client(int listen_fd, std::vector<ClientState>& clients, 
     return true;
 }
 
-inline std::string trim(std::string s) {
-    auto is_space = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [&](unsigned char c) { return !is_space(c); }));
-    s.erase(std::find_if(s.rbegin(), s.rend(), [&](unsigned char c) { return !is_space(c); }).base(), s.end());
-    return s;
-}
-
 
 struct SessionData {
     std::unordered_map<int, std::string> nick_by_fd;

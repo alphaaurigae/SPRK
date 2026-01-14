@@ -160,30 +160,6 @@ inline ssize_t full_recv(int fd, unsigned char *buf, size_t len)
     return full_recv(fd, std::span<unsigned char>(buf, len));
 }
 
-inline ssize_t tls_full_recv(SSL* ssl, void* buf, size_t len) {
-    size_t total = 0;
-    while (total < len) {
-        ssize_t got = SSL_read(ssl, static_cast<char*>(buf) + total, len - total);
-        if (got <= 0) {
-            int err = SSL_get_error(ssl, got);
-            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) continue;
-            return got;
-        }
-        total += got;
-    }
-    return total;
-}
-
-inline ssize_t tls_full_send(SSL* ssl, const void* buf, size_t len) {
-    size_t total = 0;
-    while (total < len) {
-        ssize_t got = SSL_write(ssl, static_cast<const char*>(buf) + total, len - total);
-        if (got <= 0) return got;
-        total += got;
-    }
-    return total;
-}
-
 inline std::string trim(std::string s)
 {
     const auto is_space = [](unsigned char c) noexcept {

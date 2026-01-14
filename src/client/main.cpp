@@ -3,6 +3,7 @@
 #include "common_util.h"
 #include "net_tls_context.h"
 #include "net_socket_util.h"
+#include "net_tls_frame_io.h"
 #include "net_username_util.h"
 #include "net_rekey_util.h"
 #include <algorithm>
@@ -861,13 +862,13 @@ inline void process_pubkey_response(const Parsed &p)
     std::cout << "pubkey " << p.username << " " << hexpk << "\n";
 }
 
-void reader_thread(int sock, SSL *ssl)
+inline void reader_thread([[maybe_unused]] int sock, SSL *ssl)
 {
     while (should_reconnect && is_connected)
     {
         
         std::vector<unsigned char> frame;
-        if (!tls_read_full_frame(ssl, frame))
+        if (!tls_peek_and_read_frame(ssl, frame))
         {
             is_connected = false;
             break;

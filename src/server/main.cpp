@@ -3,6 +3,7 @@
 #include "common_util.h"
 #include "net_tls_context.h"
 #include "net_socket_util.h"
+#include "net_tls_frame_io.h"
 #include "net_username_util.h"
 #include "net_rekey_util.h"
 #include <algorithm>

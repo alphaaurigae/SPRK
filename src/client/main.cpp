@@ -6,6 +6,7 @@
 #include "net_tls_frame_io.h"
 #include "net_username_util.h"
 #include "net_rekey_util.h"
+#include "net_message_util.h"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
@@ -968,44 +969,7 @@ get_ready_recipients(const std::vector<std::string> &resolved)
     return ready;
 }
 
-struct MessageContext
-{
-    std::vector<unsigned char> aad;
-    uint32_t                   seq = 0;
-    secure_vector              session_key;
-    std::string                shortfp         = "(no fp)";
-    std::string                target_username = "(unknown)";
-    bool                       valid           = false;
-};
 
-inline MessageContext prepare_message_context(const std::string &recipient_key)
-{
-    MessageContext ctx;
-
-    const std::lock_guard<std::mutex> lk(peers_mtx);
-    const auto                        it = peers.find(recipient_key);
-    if (it == peers.end())
-        return ctx;
-
-    const auto &pi      = it->second;
-    ctx.seq             = pi.send_seq;
-    ctx.session_key     = pi.sk.key;
-    ctx.target_username = pi.username;
-
-    if (!pi.identity_pk.empty())
-    {
-        const auto        fp    = fingerprint_sha256(std::vector<unsigned char>(
-            pi.identity_pk.begin(), pi.identity_pk.end()));
-        const std::string hexfp = fingerprint_to_hex(fp);
-        ctx.shortfp = (hexfp.size() > 10) ? hexfp.substr(0, 10) : hexfp;
-    }
-
-    const std::string aad_s =
-        my_fp_hex + "|" + pi.peer_fp_hex + "|" + std::to_string(ctx.seq);
-    ctx.aad.assign(aad_s.begin(), aad_s.end());
-    ctx.valid = true;
-    return ctx;
-}
 
 // Returns true if the line was a command that was fully handled
 inline bool handle_client_command(const std::string &line, 
@@ -1118,7 +1082,10 @@ inline bool send_message_to_peer(int sock, const std::string &msg,
 {
     rotate_ephemeral_if_needed(sock, recipient_fp.value);
 
-    const auto ctx = prepare_message_context(recipient_fp.value);
+    const auto ctx = prepare_message_context(recipient_fp.value,
+                                             my_fp_hex,
+                                             peers,
+                                             peers_mtx);
     if (!ctx.valid)
     {
         return true;
@@ -1128,8 +1095,10 @@ inline bool send_message_to_peer(int sock, const std::string &msg,
         derive_nonce_from_session(ctx.session_key, ctx.seq);
 
     const auto ct = aead_encrypt_with_nonce(
-        ctx.session_key, std::vector<unsigned char>(msg.begin(), msg.end()),
-        ctx.aad, nonce);
+        ctx.session_key,
+        std::span<const unsigned char>(reinterpret_cast<const unsigned char*>(msg.data()), msg.size()),
+        std::span<const unsigned char>(ctx.aad.data(), ctx.aad.size()),
+        nonce);
 
     const auto frame =
         build_chat(ctx.target_username, my_username, get_my_fingerprint_array(),

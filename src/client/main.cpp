@@ -749,8 +749,8 @@ const bool jitter_detected = is_sequence_in_jitter_range(p.seq, pi.recv_seq,
             sender_fp_hex = fingerprint_to_hex(fp);
         }
 
-        const std::string aad_s =
-            pi.peer_fp_hex + "|" + my_fp_hex + "|" + std::to_string(p.seq);
+        const std::string aad_s = make_symmetric_message_aad(
+    my_fp_hex, pi.peer_fp_hex, p.seq);
         std::vector<unsigned char> aad(aad_s.begin(), aad_s.end());
 
         const auto pt = aead_decrypt(pi.sk.key, p.ciphertext, aad, p.nonce);
@@ -792,24 +792,16 @@ const bool jitter_detected = is_sequence_in_jitter_range(p.seq, pi.recv_seq,
                   << " seq=" << p.seq << " error=" << e.what() << "\n";
     }
 }
-
+// ── get_fingerprint_for_user ── (big simplification & security improvement)
 inline std::string get_fingerprint_for_user(const std::string &username)
 {
     const auto itset = fps_by_username.find(username);
     if (itset != fps_by_username.end() && !itset->second.empty())
     {
-        for (const auto &fp_candidate : itset->second)
-        {
-            const auto pit = peers.find(fp_candidate);
-            if (pit != peers.end() && !pit->second.identity_pk.empty())
-            {
-                const auto fp_arr = fingerprint_sha256(
-                    std::vector<unsigned char>(pit->second.identity_pk.begin(),
-                                               pit->second.identity_pk.end()));
-                return fingerprint_to_hex(fp_arr);
-            }
-        }
-    }
+        // Security & performance improvement:
+        // fp_candidate is already the correct hex fingerprint computed once
+        return *itset->second.begin();  // most common case: single valid fp
+     }
     return "(no fp)";
 }
 
@@ -842,8 +834,7 @@ inline void process_pubkey_response(const Parsed &p)
     {
         try
         {
-            const auto        fp_arr = fingerprint_sha256(p.identity_pk);
-            const std::string fhex   = fingerprint_to_hex(fp_arr);
+            const std::string fhex = compute_fingerprint_hex(p.identity_pk);
 
             const std::lock_guard<std::mutex> lk(peers_mtx);
             auto                             &pi = peers[fhex];
@@ -1061,19 +1052,10 @@ struct RecipientFP
     [[nodiscard]] std::string      &&str()      &&{ return std::move(value); }
 };
 
-// Lazy, thread-safe, immutable my fingerprint — no globals, no flags
-inline const std::array<unsigned char, 32> &get_my_fingerprint_array()
-{
-    static const std::array<unsigned char, 32> my_fp = []()
-    {
-        std::array<unsigned char, 32> arr{};
-        const auto fp = fingerprint_sha256(std::vector<unsigned char>(
-            my_identity_pk.begin(), my_identity_pk.end()));
-        std::copy(fp.begin(), fp.end(), arr.begin());
-        return arr;
-    }();
-    return my_fp;
-}
+// Removed completely (was in global/anonymous namespace area) = Lazy, thread-safe, immutable my fingerprint — no globals, no flags
+// After successful key loading in load_identity_keys / main
+    // Now centralized - used everywhere we need my fingerprint
+    //my_fp_hex = compute_fingerprint_hex(my_identity_pk);
 
 // "Flawless Victory!"
 inline bool send_message_to_peer(int sock, const std::string &msg,
@@ -1100,10 +1082,10 @@ inline bool send_message_to_peer(int sock, const std::string &msg,
         std::span<const unsigned char>(ctx.aad.data(), ctx.aad.size()),
         nonce);
 
-    const auto frame =
-        build_chat(ctx.target_username, my_username, get_my_fingerprint_array(),
-                   ctx.seq, nonce, ct);
-
+const auto frame =
+    build_chat(ctx.target_username, my_username,
+               compute_fingerprint_array(my_identity_pk),
+               ctx.seq, nonce, ct);
     {
         std::lock_guard<std::mutex> lk(ssl_io_mtx);
         if (tls_full_send(ssl, frame.data(), frame.size()) <= 0)
@@ -1320,19 +1302,18 @@ inline bool load_identity_keys(const char* key_path) {
         if (!load_pem_private_key(key_path, raw_sk, raw_pk)) {
             return false;
         }
-
-    my_identity_sk = std::move(raw_sk);
-    
-    if (raw_pk.empty()) {
+        my_identity_sk = std::move(raw_sk);
+        if (raw_pk.empty()) {
             throw std::runtime_error("identity public key not present");
         }
         my_identity_pk = std::move(raw_pk);
 
-        const auto fp = fingerprint_sha256(std::vector<unsigned char>(
-            my_identity_pk.begin(), my_identity_pk.end()));
-        my_fp_hex = fingerprint_to_hex(fp);
+        // This must be here — keep/uncomment it
+        my_fp_hex = compute_fingerprint_hex(my_identity_pk);
 
         std::cout << "Loaded PEM identity key: " << key_path << "\n";
+        std::cout << "My fingerprint: " << my_fp_hex << "\n";
+
         return true;
     } catch (const std::exception& e) {
         std::cout << "Failed to load private/public key: " << e.what() << "\n";

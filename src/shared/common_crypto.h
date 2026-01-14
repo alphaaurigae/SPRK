@@ -796,4 +796,30 @@ pqkem_keypair_from_seed(std::string_view alg, const secure_vector& seed)
     throw std::runtime_error("pqkem not enabled at build");
 #endif
 }
+
+// After existing fingerprint_sha256 and fingerprint_to_hex
+
+// ──────────────────────────────────────────────────────────────
+// Convenience wrappers – added in refactoring steps 2–3
+// ──────────────────────────────────────────────────────────────
+
+inline std::string compute_fingerprint_hex(std::span<const unsigned char> pk)
+{
+    return fingerprint_to_hex(fingerprint_sha256(pk));
+}
+
+inline std::array<unsigned char, SHA256_LEN>
+compute_fingerprint_array(std::span<const unsigned char> pk)
+{
+    return fingerprint_sha256(pk);
+}
+
+inline std::string make_symmetric_message_aad(
+    std::string_view fp_a, std::string_view fp_b, uint32_t seq)
+{
+    std::string a(fp_a);
+    std::string b(fp_b);
+    if (a > b) std::swap(a, b);  // always smaller first
+    return a + "|" + b + "|" + std::to_string(seq);
+}
 #endif

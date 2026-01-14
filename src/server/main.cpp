@@ -262,13 +262,11 @@ static void register_client(SessionData &sd, int client_fd,
                             const std::vector<unsigned char> &frame)
 {
 
+    // In handle_hello_message → register_client block
     // Compute fingerprint if identity key present
-    std::string fp_hex;
-    if (!p.identity_pk.empty())
-    {
-        auto fp_arr = fingerprint_sha256(p.identity_pk);
-        fp_hex      = fingerprint_to_hex(fp_arr);
-    }
+    std::string fp_hex = p.identity_pk.empty()
+                       ? ""
+                       : compute_fingerprint_hex(p.identity_pk);
 
     // Always register nickname
     sd.nick_by_fd[client_fd] = uname;

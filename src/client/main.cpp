@@ -7,6 +7,8 @@
 #include "net_username_util.h"
 #include "net_rekey_util.h"
 #include "net_message_util.h"
+#include "net_key_util.h"
+
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
@@ -54,22 +56,15 @@ struct PeerInfo
 };
 
 static constexpr uint32_t REKEY_INTERVAL         = 1024;
-
-
 static constexpr size_t   MAX_PEERS              = 256;
-
 static constexpr uint32_t RATE_LIMIT_MSGS        = 100;
 static constexpr uint64_t RATE_LIMIT_WINDOW_MS   = 1000;
-
 static constexpr uint32_t MAX_RECONNECT_ATTEMPTS = 10;
 static constexpr uint64_t INITIAL_BACKOFF_MS     = 1000;
 static constexpr uint64_t MAX_BACKOFF_MS         = 60000;
 static constexpr size_t   MIN_FP_PREFIX_HEX      = 16;
 
 
-// NOLINTBEGIN(cppcoreguidelines-avoid-non-const-global-variables)
-namespace
-{
 inline std::unordered_map<std::string, PeerInfo> peers;
 inline std::unordered_map<std::string, std::unordered_set<std::string>>
                         fps_by_username;
@@ -78,22 +73,23 @@ inline std::string      my_username;
 inline std::string      session_id;
 inline secure_vector    my_eph_pk;
 inline secure_vector    my_eph_sk;
-inline secure_vector    my_identity_pk;
-inline secure_vector    my_identity_sk;
-inline std::string      my_fp_hex;
+
+secure_vector           my_identity_pk;
+secure_vector           my_identity_sk;
+std::string             my_fp_hex;
+
+namespace
+{
 inline bool             debug_mode = false;
 inline std::atomic_bool should_reconnect{true};
 inline std::atomic_bool is_connected{false};
-} // namespace
-// NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
+}
 
 inline SSL_CTX* ssl_ctx = nullptr;
 inline SSL* ssl = nullptr;
 inline std::mutex ssl_io_mtx;
-
-
-
 inline bool init_oqs_provider()
+
 {
     static OSSL_PROVIDER *oqsprov = nullptr;
     if (!oqsprov)
@@ -130,15 +126,6 @@ inline std::string format_hhmmss(uint64_t ms)
     return std::format("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec);
 }
 
-
-
-
-struct PQKeypair
-{
-    secure_vector              sk;
-    std::vector<unsigned char> pk;
-};
-
 inline std::vector<unsigned char> read_file_raw(const std::string &path)
 {
     std::ifstream file(path, std::ios::binary);
@@ -156,44 +143,6 @@ struct AlgorithmName
 {
     std::string value;
 };
-
-struct SessionId
-{
-    std::string value;
-};
-
-struct PeerName
-{
-    std::string value;
-};
-
-inline PQKeypair derive_ephemeral_for_peer(const secure_vector &identity_sk,
-                                           const SessionId     &session_id,
-                                           const PeerName      &peer)
-{
-#ifdef USE_LIBOQS
-    std::vector<unsigned char> salt(session_id.value.begin(),
-                                    session_id.value.end());
-    salt.insert(salt.end(), peer.value.begin(), peer.value.end());
-
-    OQS_KEM *kem = OQS_KEM_new("Kyber512");
-    if (kem == nullptr)
-        throw std::runtime_error("pqkem new failed");
-
-    const secure_vector derived_key =
-        hkdf(identity_sk, salt, kem->length_secret_key);
-    OQS_KEM_free(kem);
-
-    auto pqkp = pqkem_keypair_from_seed("Kyber512", derived_key);
-
-    PQKeypair ret;
-    ret.pk.assign(pqkp.first.begin(), pqkp.first.end());
-    ret.sk = secure_vector(pqkp.second.begin(), pqkp.second.end());
-    return ret;
-#else
-    throw std::runtime_error("liboqs not enabled at build");
-#endif
-}
 
 static bool check_rate_limit(PeerInfo &pi) noexcept
 {
@@ -401,17 +350,6 @@ bool validate_username(const std::string &peer_name, uint64_t ms)
         return false;
     }
     return true;
-}
-
-std::string compute_peer_key(const Parsed &p, std::string &peer_fp_hex)
-{
-    if (!p.identity_pk.empty())
-    {
-        const auto fp = fingerprint_sha256(p.identity_pk);
-        peer_fp_hex   = fingerprint_to_hex(fp);
-        return peer_fp_hex;
-    }
-    return "uname:" + trim(p.username);
 }
 
 void update_peer_info(PeerInfo &pi, const std::string &peer_name,
@@ -1052,11 +990,6 @@ struct RecipientFP
     [[nodiscard]] std::string      &&str()      &&{ return std::move(value); }
 };
 
-// Removed completely (was in global/anonymous namespace area) = Lazy, thread-safe, immutable my fingerprint — no globals, no flags
-// After successful key loading in load_identity_keys / main
-    // Now centralized - used everywhere we need my fingerprint
-    //my_fp_hex = compute_fingerprint_hex(my_identity_pk);
-
 // "Flawless Victory!"
 inline bool send_message_to_peer(int sock, const std::string &msg,
                                  const RecipientFP &recipient_fp, SSL *ssl)
@@ -1176,7 +1109,7 @@ void writer_thread(int sock, SSL *ssl)
                 int err = SSL_get_error(ssl, 0);
                 if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
                     dev_println("[" + std::to_string(get_current_timestamp_ms()) + "] send would block, retrying...");
-                    continue;  // temporary, try next loop iteration
+                    continue;
                 }
                 std::cerr << "[" << get_current_timestamp_ms() << "] send failed (err=" << err << ") - peer/server likely dropped connection\n";
                 is_connected.store(false, std::memory_order_release);
@@ -1246,80 +1179,7 @@ inline ConnectionConfig parse_command_line_args(std::span<char *> args)
 }
 
 // --- 2. Identity key loading ---
-// Helper: Load PEM private key and extract raw sk + pk for protocol use
-inline bool load_pem_private_key(const std::string& path,
-                                 secure_vector& out_sk,
-                                 secure_vector& out_pk) {
-    FILE* fp = fopen(path.c_str(), "r");
-    if (!fp) {
-        std::cerr << "Cannot open PEM file: " << path << "\n";
-        return false;
-    }
-
-    EVP_PKEY* pkey = PEM_read_PrivateKey(fp, nullptr, nullptr, nullptr);
-    fclose(fp);
-
-    if (!pkey) {
-        std::cerr << "Failed to read PEM private key from " << path << "\n";
-        ERR_print_errors_fp(stderr);
-        return false;
-    }
-
-    // Extract raw secret key bytes (ML-DSA-87 secret key)
-    size_t sk_len = 0;
-    if (EVP_PKEY_get_raw_private_key(pkey, nullptr, &sk_len) <= 0) {
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-    std::vector<unsigned char> raw_sk(sk_len);
-    if (EVP_PKEY_get_raw_private_key(pkey, raw_sk.data(), &sk_len) <= 0) {
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-    out_sk.assign(raw_sk.begin(), raw_sk.end());
-
-    // Extract raw public key bytes
-    size_t pk_len = 0;
-    if (EVP_PKEY_get_raw_public_key(pkey, nullptr, &pk_len) <= 0) {
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-    std::vector<unsigned char> raw_pk(pk_len);
-    if (EVP_PKEY_get_raw_public_key(pkey, raw_pk.data(), &pk_len) <= 0) {
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-    out_pk.assign(raw_pk.begin(), raw_pk.end());
-
-    EVP_PKEY_free(pkey);
-    return true;
-}
-
-// --- 2. Identity key loading (PEM version only) ---
-inline bool load_identity_keys(const char* key_path) {
-    try {
-        secure_vector raw_sk, raw_pk;
-        if (!load_pem_private_key(key_path, raw_sk, raw_pk)) {
-            return false;
-        }
-        my_identity_sk = std::move(raw_sk);
-        if (raw_pk.empty()) {
-            throw std::runtime_error("identity public key not present");
-        }
-        my_identity_pk = std::move(raw_pk);
-
-        // This must be here — keep/uncomment it
-        my_fp_hex = compute_fingerprint_hex(my_identity_pk);
-
-        std::cout << "Loaded PEM identity key: " << key_path << "\n";
-        std::cout << "My fingerprint: " << my_fp_hex << "\n";
-
-        return true;
-    } catch (const std::exception& e) {
-        std::cout << "Failed to load private/public key: " << e.what() << "\n";
-        return false;
-    }
-}
+// moved to net_key_util.h
 
 // --- 3. Session ID handling ---
 inline bool setup_session_id(std::span<char *> args)
@@ -1469,9 +1329,7 @@ try
 
     crypto_init();
 
-    // ────────────────────────────────────────────────────────
     // Initialize TLS context (this also loads OQS providers)
-    // ────────────────────────────────────────────────────────
     std::string cert_path = std::string("sample/sample_test_cert/") + my_username + ".crt";
     std::string key_path  = std::string("sample/sample_test_cert/") + my_username + "_tls.key";
     

@@ -1,0 +1,220 @@
+#pragma once
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include "session.h"
+
+
+static void broadcast_hello_to_peers(const SessionData &sd, int client_fd,
+                                     const std::vector<unsigned char> &frame,
+                                     const std::vector<ClientState>& clients)
+{
+    for (const auto &kv : sd.fd_by_nick)
+    {
+        int dst_fd = kv.second;
+        if (dst_fd == client_fd) continue;
+
+        auto it = std::find_if(clients.begin(), clients.end(),
+                               [dst_fd](const ClientState& cs) { return cs.fd == dst_fd; });
+        if (it != clients.end()) {
+            tls_full_send(it->ssl, frame.data(), frame.size());
+        }
+    }
+}
+
+inline bool handle_hello_message(const ClientState& client_state,
+                                 const Parsed &p,
+                                 const std::vector<unsigned char> &frame,
+                                 std::unordered_map<std::string, SessionData> &sessions,
+                                 std::unordered_map<int, std::string> &session_by_fd,
+                                 std::vector<ClientState>& clients,
+                                 std::vector<int> &to_remove)
+{
+    int client_fd = client_state.fd;
+    std::string uname;
+    std::string sid;
+    std::string error = validate_hello_basics(p, uname, sid);
+
+    if (!error.empty())
+    {
+        std::cout << "REJECTED: " << error << " for " << uname << "\n";
+        to_remove.push_back(client_fd);
+        return false;
+    }
+
+    SessionData &sd = sessions[sid];
+
+    if (!check_username_conflicts(sd, uname, client_fd, to_remove))
+    {
+        return false;
+    }
+
+    cleanup_old_nickname(sd, client_fd, uname);
+    register_client(sd, client_fd, uname, p, frame);
+
+    session_by_fd[client_fd] = sid;
+    std::cout << "connect " << uname << " session=" << sid << "\n";
+
+    broadcast_hello_to_peers(sd, client_fd, frame, clients);
+
+    // Send existing hellos to new client (core protocol handshake — keep
+    // visible)
+    for (const auto &kv : sd.hello_message_by_fingerprint)
+    {
+        const std::string &existing_fp = kv.first;
+        if (!existing_fp.empty())
+        {
+            auto itn = sd.nick_by_fingerprint.find(existing_fp);
+            if (itn != sd.nick_by_fingerprint.end() && itn->second == uname)
+                continue;
+        }
+        const auto &existing_hello = kv.second;
+        try
+        {
+            uint32_t existing_payload_len = read_u32_be(existing_hello.data());
+            Parsed p2 = parse_payload(existing_hello.data() + 4, existing_payload_len);
+            std::vector<unsigned char> empty_encaps;
+            auto stripped = build_hello(p2.username, ALGO_KYBER512, p2.eph_pk,
+                                        p2.id_alg, p2.identity_pk, p2.signature,
+                                        empty_encaps, p2.session_id);
+            tls_full_send(client_state.ssl, stripped.data(), stripped.size());
+        }
+        catch (...)
+        {
+            tls_full_send(client_state.ssl, existing_hello.data(), existing_hello.size());
+        }
+    }
+
+    return true;
+}
+
+inline void handle_chat_message(const ClientState& client_state,
+                                const Parsed &p,
+                                const std::vector<unsigned char> &frame,
+                                const std::unordered_map<int, std::string> &session_by_fd,
+                                std::unordered_map<std::string, SessionData> &sessions,
+                                const std::vector<ClientState>& clients)
+{
+    int client_fd = client_state.fd;
+    auto sid_it = session_by_fd.find(client_fd);
+    if (sid_it == session_by_fd.end()) return;
+
+    auto sess_it = sessions.find(sid_it->second);
+    if (sess_it == sessions.end()) return;
+
+    SessionData &sd = sess_it->second;
+
+    int dst = -1;
+
+    if (auto it = sd.fd_by_nick.find(p.to); it != sd.fd_by_nick.end())
+    {
+        dst = it->second;
+    }
+    else if (p.to.size() >= 4)
+    {
+        std::string lower = p.to;
+        std::ranges::transform(lower, lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        auto it = std::ranges::find_if(sd.fd_by_fingerprint,
+                                       [&lower](const auto& kv) {
+                                           const std::string& fp = kv.first;
+                                           if (fp.size() < lower.size()) return false;
+                                           return std::ranges::equal(lower.begin(), lower.end(),
+                                                                     fp.begin(), fp.begin() + lower.size(),
+                                                                     [](unsigned char a, unsigned char b) {
+                                                                         return std::tolower(a) == std::tolower(b);
+                                                                     });
+                                       });
+        if (it != sd.fd_by_fingerprint.end()) dst = it->second;
+    }
+
+    if (dst != -1) {
+        auto it = std::find_if(clients.begin(), clients.end(),
+                               [dst](const ClientState& cs) { return cs.fd == dst; });
+        if (it != clients.end()) {
+            tls_full_send(it->ssl, frame.data(), frame.size());
+        }
+    }
+}
+
+inline void handle_list_request(const ClientState& client_state,
+                                const std::unordered_map<int, std::string>& session_by_fd,
+                                std::unordered_map<std::string, SessionData>& sessions,
+                                const std::vector<ClientState>& clients)
+{
+    int client_fd = client_state.fd;
+    auto sid_it = session_by_fd.find(client_fd);
+    if (sid_it == session_by_fd.end()) return;
+
+    const std::string& sid = sid_it->second;
+    auto session_it = sessions.find(sid);
+    if (session_it == sessions.end()) return;
+
+    SessionData& sd = session_it->second;
+    std::vector<std::string> users;
+    users.reserve(sd.fd_by_nick.size());
+    for (auto& kv : sd.fd_by_nick) users.push_back(kv.first);
+    auto resp = build_list_response(users);
+    tls_full_send(client_state.ssl, resp.data(), resp.size());
+}
+
+inline void handle_pubkey_request(const ClientState& client_state,
+                                  const Parsed &p,
+                                  const std::unordered_map<int, std::string>& session_by_fd,
+                                  std::unordered_map<std::string, SessionData>& sessions,
+                                  const std::vector<ClientState>& clients)
+{
+    int client_fd = client_state.fd;
+    auto sid_it = session_by_fd.find(client_fd);
+    if (sid_it == session_by_fd.end()) return;
+
+    const std::string& sid = sid_it->second;
+    auto session_it = sessions.find(sid);
+    if (session_it == sessions.end()) return;
+
+    SessionData& sd = session_it->second;
+    std::string target = trim(p.username);
+
+    std::vector<unsigned char> pk;
+
+    auto itn = sd.fd_by_nick.find(target);
+    if (itn != sd.fd_by_nick.end())
+    {
+        int dstfd = itn->second;
+        auto itfp = sd.fingerprint_hex_by_fd.find(dstfd);
+        if (itfp != sd.fingerprint_hex_by_fd.end())
+        {
+            auto itpk = sd.identity_pk_by_fingerprint.find(itfp->second);
+            if (itpk != sd.identity_pk_by_fingerprint.end())
+                pk = itpk->second;
+        }
+    }
+    else
+    {
+        std::vector<std::string> matches;
+        for (auto& kv : sd.identity_pk_by_fingerprint)
+        {
+            const std::string& hexfp = kv.first;
+            if (hexfp.size() >= target.size())
+            {
+                bool ok = true;
+                for (size_t i = 0; i < target.size(); ++i)
+                {
+                    if (std::tolower((unsigned char)hexfp[i]) != std::tolower((unsigned char)target[i]))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) matches.push_back(hexfp);
+            }
+        }
+        if (matches.size() == 1)
+        {
+            pk = sd.identity_pk_by_fingerprint[matches[0]];
+        }
+    }
+    auto resp = build_pubkey_response(target, pk);
+    tls_full_send(client_state.ssl, resp.data(), resp.size());
+}
+

@@ -10,13 +10,60 @@
 #include <cctype>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <vector>
+
+#include <iostream>
+#include <fstream>
+
+#include <atomic>
+
+#include <ctime>
+#include <format>
+
+
 #include <openssl/ssl.h>
 #include <openssl/err.h> 
+
+
+
+
+inline std::atomic_bool debug_mode{false};
+
+inline void dev_print(std::string_view s)
+{
+    if (debug_mode.load())
+        std::cout << s;
+}
+
+inline void dev_println(std::string_view s)
+{
+    if (debug_mode.load())
+        std::cout << s << "\n";
+}
+
+
+inline std::string format_hhmmss(uint64_t ms)
+{
+    const auto t = static_cast<std::time_t>(ms / 1000);
+    std::tm    tm{};
+    localtime_r(&t, &tm);
+
+    return std::format("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec);
+}
+
+inline std::vector<unsigned char> read_file_raw(const std::string &path)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+        throw std::runtime_error("cannot open key file");
+    return {std::istreambuf_iterator<char>(file),
+            std::istreambuf_iterator<char>()};
+}
 
 inline std::string to_hex(std::span<const unsigned char> data)
 {

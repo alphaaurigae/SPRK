@@ -28,6 +28,15 @@ inline constexpr std::size_t TAG_LEN = 16;
 inline constexpr std::size_t NONCE_BYTES = 12;
 inline constexpr std::size_t SHA256_LEN = 32;
 
+inline constexpr std::size_t MIN_FP_PREFIX_HEX = 16;
+
+inline bool is_valid_hex_token(const std::string &token) noexcept
+{
+    return token.size() >= MIN_FP_PREFIX_HEX &&
+           std::all_of(token.begin(), token.end(), [](unsigned char c) noexcept
+                       { return std::isxdigit(c) != 0; });
+}
+
 struct secure_vector : std::vector<unsigned char>
 {
     using std::vector<unsigned char>::vector;

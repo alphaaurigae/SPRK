@@ -1,13 +1,13 @@
 #pragma once
 #include <string>
+#include <span>
+#include <iostream>
+#include <algorithm>
+#include <mutex>
+#include <vector>
 #include <functional>
 #include <memory>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <system_error>
-#include <arpa/inet.h>
-#include <netdb.h>
+#include <openssl/ssl.h>
 
 #include "common_util.h"
 #include "client_crypto_util.h"

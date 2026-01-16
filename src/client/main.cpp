@@ -97,11 +97,20 @@ try
     }
 
     // Load OQS provider for protocol-level crypto (separate from TLS)
-    if (!init_oqs_provider()) {
-        std::cerr << "Cannot continue without OQS provider for protocol crypto\n";
-        SSL_CTX_free(ssl_ctx);
-        ssl_ctx = nullptr;
-        return 1;
+if (!init_oqs_provider()) {
+    std::cerr << "Cannot continue without OQS provider for protocol crypto\n";
+    ssl_ctx.reset();
+    return 1;
+}
+
+    {
+        const std::lock_guard<std::mutex> lk(ssl_io_mtx);
+        ssl = SSL_new(ssl_ctx->native_handle());   // create SSL* from Asio context
+        if (!ssl) {
+            std::cerr << "Failed to create SSL object\n";
+            ssl_ctx.reset();
+            return 1;
+        }
     }
 
     secure_vector persisted_eph_pk;
@@ -172,10 +181,20 @@ try
         std::cout << "[" << get_current_timestamp_ms() << "] max reconnection attempts reached\n";
     }
 
-    if (ssl_ctx) {
-        SSL_CTX_free(ssl_ctx);
-        ssl_ctx = nullptr;
+    {
+        const std::lock_guard<std::mutex> lk(ssl_io_mtx);
+        if (ssl)
+        {
+            if (SSL_is_init_finished(ssl))
+            {
+                SSL_shutdown(ssl);
+            }
+            SSL_free(ssl);
+            ssl = nullptr;
+        }
     }
+
+    ssl_ctx.reset();  // shared_ptr releases the context automatically
 
     return 0;
 }

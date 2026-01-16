@@ -1,4 +1,6 @@
 #pragma once
+
+#include "client_runtime.h"
 #include <string>
 #include <vector>
 #include <iostream>
@@ -9,7 +11,7 @@
 #include "peer_manager.h"
 #include "net_message_util.h"
 #include "net_tls_frame_io.h"
-#include "client_runtime.h"
+
 
 // Strong type to prevent swapping msg and recipient_fp
 struct RecipientFP

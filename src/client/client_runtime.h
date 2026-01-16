@@ -1,11 +1,13 @@
 #pragma once
-
 #include <atomic>
 #include <mutex>
+#include <memory>
 #include <openssl/ssl.h>
+
+struct AsioSSLContextWrapper;
 
 inline std::mutex ssl_io_mtx;
 inline SSL* ssl = nullptr;
-inline SSL_CTX* ssl_ctx = nullptr;
+inline std::shared_ptr<AsioSSLContextWrapper> ssl_ctx;
 inline std::atomic_bool is_connected{false};
 inline std::atomic_bool should_reconnect{true};

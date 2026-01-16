@@ -1,13 +1,16 @@
+// server/client_state.h
 #pragma once
 #include <vector>
 #include <algorithm>
 #include <unistd.h>
 #include <openssl/ssl.h>
+#include <memory>
+
+struct AsioSSLContextWrapper;
 
 struct ClientState {
     int fd = -1;
     SSL* ssl = nullptr;
-
     ClientState() = default;
     ClientState(int f, SSL* s) : fd(f), ssl(s) {}
     
@@ -29,11 +32,9 @@ struct ClientState {
         }
         return *this;
     }
-
     ~ClientState() {
         cleanup();
     }
-
 private:
     void cleanup() noexcept {
         if (ssl) {
@@ -48,7 +49,7 @@ private:
     }
 };
 
-inline bool accept_new_client(int listen_fd, std::vector<ClientState>& clients, SSL_CTX* ctx) {
+inline bool accept_new_client(int listen_fd, std::vector<ClientState>& clients, const std::shared_ptr<AsioSSLContextWrapper>& ctx) {
     int c = accept(listen_fd, nullptr, nullptr);
     if (c < 0) return false;
     if (c >= FD_SETSIZE) {
@@ -61,7 +62,7 @@ inline bool accept_new_client(int listen_fd, std::vector<ClientState>& clients, 
         return true;
     }
     
-    SSL* ssl = SSL_new(ctx);
+    SSL* ssl = SSL_new(ctx->native_handle());
     if (!ssl) {
         close(c);
         return true;
@@ -77,7 +78,6 @@ static void prune_invalid_clients(std::vector<ClientState>& clients) {
     clients.erase(std::remove_if(clients.begin(), clients.end(),
                                  [](const ClientState& cs) {
                                      if (cs.fd >= FD_SETSIZE) {
-                                         // Destructor handles close & SSL_free
                                          return true;
                                      }
                                      return false;

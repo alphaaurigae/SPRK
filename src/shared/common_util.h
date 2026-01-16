@@ -1,3 +1,4 @@
+// common_util.h
 #ifndef COMMON_UTIL_H
 #define COMMON_UTIL_H
 #include <array>
@@ -11,10 +12,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <vector>
 
 #include <iostream>
@@ -25,12 +22,10 @@
 #include <ctime>
 #include <format>
 
-
 #include <openssl/ssl.h>
-#include <openssl/err.h> 
+#include <openssl/err.h>
 
-
-
+#include <asio.hpp>
 
 inline std::atomic_bool debug_mode{false};
 
@@ -45,7 +40,6 @@ inline void dev_println(std::string_view s)
     if (debug_mode.load())
         std::cout << s << "\n";
 }
-
 
 inline std::string format_hhmmss(uint64_t ms)
 {
@@ -138,32 +132,15 @@ inline void write_u32_be(unsigned char *p, uint32_t v)
 }
 
 inline ssize_t full_send(int fd, std::span<const unsigned char> data)
-{
-    size_t sent = 0;
-    while (sent < data.size())
-    {
-        const ssize_t r =
-            send(fd, data.subspan(sent).data(), data.size() - sent, 0);
-        if (r < 0) [[unlikely]]
-        {
-            if (errno == EINTR) [[likely]]
-                continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
-                fd_set wf;
-                FD_ZERO(&wf);
-                FD_SET(fd, &wf);
-                timeval   tv{1, 0};
-                const int s = select(fd + 1, nullptr, &wf, nullptr, &tv);
-                if (s <= 0)
-                    return -1;
-                continue;
-            }
-            return -1;
-        }
-        sent += static_cast<size_t>(r);
-    }
-    return static_cast<ssize_t>(sent);
+ {
+    std::error_code ec;
+    asio::io_context io;
+    asio::ip::tcp::socket sock(io);
+    sock.assign(asio::ip::tcp::v4(), fd, ec);
+    if (ec) return -1;
+    size_t written = asio::write(sock, asio::buffer(data.data(), data.size()), ec);
+    sock.release();
+    return ec ? -1 : static_cast<ssize_t>(written);
 }
 
 inline ssize_t full_send(int fd, const unsigned char *buf, size_t len)
@@ -171,40 +148,36 @@ inline ssize_t full_send(int fd, const unsigned char *buf, size_t len)
     return full_send(fd, std::span<const unsigned char>(buf, len));
 }
 
+inline ssize_t full_send_asio(asio::ip::tcp::socket& sock, std::span<const unsigned char> data)
+{
+    std::error_code ec;
+    size_t written = asio::write(sock, asio::buffer(data.data(), data.size()), ec);
+    return ec ? -1 : static_cast<ssize_t>(written);
+}
+
 inline ssize_t full_recv(int fd, std::span<unsigned char> buf)
 {
-    size_t got = 0;
-    while (got < buf.size())
-    {
-        const ssize_t r =
-            recv(fd, buf.subspan(got).data(), buf.size() - got, 0);
-        if (r < 0) [[unlikely]]
-        {
-            if (errno == EINTR) [[likely]]
-                continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
-                fd_set rf;
-                FD_ZERO(&rf);
-                FD_SET(fd, &rf);
-                timeval   tv{1, 0};
-                const int s = select(fd + 1, &rf, nullptr, nullptr, &tv);
-                if (s <= 0)
-                    return -1;
-                continue;
-            }
-            return -1;
-        }
-        if (r == 0) [[unlikely]]
-            return 0;
-        got += static_cast<size_t>(r);
-    }
-    return static_cast<ssize_t>(got);
+    std::error_code ec;
+    asio::io_context io;
+    asio::ip::tcp::socket sock(io);
+    sock.assign(asio::ip::tcp::v4(), fd, ec);
+    if (ec) return -1;
+    size_t got = asio::read(sock, asio::buffer(buf.data(), buf.size()), ec);
+    sock.release();
+    return ec ? (ec == asio::error::eof ? 0 : -1) : static_cast<ssize_t>(got);
 }
 
 inline ssize_t full_recv(int fd, unsigned char *buf, size_t len)
 {
     return full_recv(fd, std::span<unsigned char>(buf, len));
+}
+
+inline ssize_t full_recv_asio(asio::ip::tcp::socket& sock, std::span<unsigned char> buf)
+{
+    std::error_code ec;
+    size_t got = asio::read(sock, asio::buffer(buf.data(), buf.size()), ec);
+    return ec ? (ec == asio::error::eof ? 0 : -1) : static_cast<ssize_t>(got);
+ 
 }
 
 inline std::string trim(std::string s)

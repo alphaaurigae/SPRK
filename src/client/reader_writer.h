@@ -1,4 +1,6 @@
 #pragma once
+
+#include "client_runtime.h"
 #include "common_crypto.h"
 #include "net_tls_frame_io.h"
 #include "net_common_protocol.h"
@@ -8,7 +10,7 @@
 #include "session.h"            // session_id, my_eph_pk, my_username
 #include "client_message_util.h" // validate_username, handle_hello, etc.
 #include "client_crypto_util.h"  // ssl_ctx, rotate_ephemeral_if_needed
-#include "client_runtime.h"
+
 
 #include <thread>
 #include <mutex>

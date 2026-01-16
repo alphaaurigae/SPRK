@@ -30,6 +30,7 @@
 #include <openssl/err.h>
 #include <openssl/provider.h> 
 
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -50,11 +51,21 @@ int main(int argc, char **argv)
     // ──────────────────────────────
     // Initialize TLS context
     // ──────────────────────────────
-    SSL_CTX* ctx = init_tls_server_context(
-        "sample/sample_test_cert/server.crt",
-        "sample/sample_test_cert/server.key",
-        "sample/sample_test_cert/ca.crt");
-    
+auto ctx = init_tls_server_context(
+         "sample/sample_test_cert/server.crt",
+         "sample/sample_test_cert/server.key",
+         "sample/sample_test_cert/ca.crt");
+    if (!ctx) {
+        std::cerr << "TLS server context initialization failed\n";
+        return 1;
+    }
+
+    SSL* ssl_obj = SSL_new(ctx->native_handle());
+    if (!ssl_obj) {
+        std::cerr << "Failed to create SSL object\n";
+        ctx.reset();
+        return 1;
+    }
     if (!ctx) {
         std::cerr << "TLS initialization failed - exiting\n";
         close(listen_fd);
@@ -92,11 +103,18 @@ int main(int argc, char **argv)
         }
     }
 
-    // Cleanup
-    clients.clear();
-    SSL_CTX_free(ctx);
+// Cleanup
+clients.clear();
+    if (ssl_obj) {
+        if (SSL_is_init_finished(ssl_obj))
+            SSL_shutdown(ssl_obj);
+        SSL_free(ssl_obj);
+        ssl_obj = nullptr;
+    }
 
-    close(listen_fd);
+    ctx.reset();
+close(listen_fd);
+return 0;
     return 0;
 }
 

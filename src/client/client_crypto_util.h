@@ -1,5 +1,6 @@
 #pragma once
 
+#include "client_runtime.h"
 #include "common_crypto.h"
 #include "net_common_protocol.h"
 #include "common_util.h"
@@ -11,7 +12,6 @@
 #include "net_message_util.h"
 #include "net_key_util.h"
 #include "peer_manager.h"
-#include "client_runtime.h"
 
 #include <algorithm>
 #include <arpa/inet.h>

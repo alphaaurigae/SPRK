@@ -1,4 +1,15 @@
+// session.h
 #pragma once
+
+#include "client_runtime.h"
+#include "common_util.h"
+#include "client_crypto_util.h"
+#include "net_key_util.h"
+#include "net_tls_frame_io.h"
+#include "net_username_util.h"
+#include "net_rekey_util.h"
+
+
 #include <string>
 #include <span>
 #include <iostream>
@@ -9,13 +20,7 @@
 #include <memory>
 #include <openssl/ssl.h>
 
-#include "common_util.h"
-#include "client_crypto_util.h"
-#include "net_key_util.h"
-#include "net_tls_frame_io.h"
-#include "net_username_util.h"
-#include "net_rekey_util.h"
-#include "client_runtime.h"
+
 
 extern std::string session_id;
 extern secure_vector my_eph_pk;
@@ -23,7 +28,6 @@ extern secure_vector my_eph_sk;
 extern std::string my_username;
 
 
-// --- 3. Session ID handling ---
 inline bool setup_session_id(std::span<char *> args)
 {
     std::string_view session_flag = "--sessionid";
@@ -51,13 +55,11 @@ inline bool setup_session_id(std::span<char *> args)
 }
 
 
-// --- 4. Single connection attempt ---
 inline int attempt_connection(const std::string &server, int port,
                               secure_vector &persisted_eph_pk,
                               secure_vector &persisted_eph_sk,
                               bool          &have_persisted_eph)
 {
-    // Generate persistent ephemeral keypair once
     if (!have_persisted_eph)
     {
         const auto [pk, sk] = pqkem_keypair("Kyber512");
@@ -76,7 +78,7 @@ inline int attempt_connection(const std::string &server, int port,
         return -1;
     }
 
-    SSL* new_ssl = SSL_new(ssl_ctx);
+    SSL* new_ssl = SSL_new(ssl_ctx->native_handle());
     if (!new_ssl)
     {
         std::cerr << "SSL_new failed\n";

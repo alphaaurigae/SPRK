@@ -20,6 +20,7 @@
 
 static inline void net_socket_util_debug(const char* msg)
 {
+    (void)msg;
 #if NET_SOCKET_UTIL_DEBUG
     if (msg) {
         write(STDERR_FILENO, msg, strlen(msg));
@@ -131,8 +132,8 @@ static inline void net_socket_util_debug(const char* msg)
 }
 
 [[nodiscard]] inline std::shared_ptr<asio::ip::tcp::acceptor>
-make_listen_acceptor(asio::io_context& io, int port, int backlog = 16, bool set_reuse_port = true, std::error_code* out_ec = nullptr) noexcept
-{
+make_listen_socket_asio(asio::io_context& io, int port, int backlog = 16, bool set_reuse_port = true, std::error_code* out_ec = nullptr) noexcept
+ {
     try {
         auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(io);
         acceptor->open(asio::ip::tcp::v4());

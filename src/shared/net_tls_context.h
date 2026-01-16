@@ -1,3 +1,4 @@
+// net_tls_context.h
 #ifndef NET_TLS_CONTEXT_H
 #define NET_TLS_CONTEXT_H
 
@@ -144,13 +145,28 @@ struct TLSContextConfig {
     return ctx;
 }
 
-[[nodiscard]] inline SSL_CTX* init_tls_server_context(
+struct AsioSSLContextWrapper {
+    SSL_CTX* ctx;
+    
+    explicit AsioSSLContextWrapper(SSL_CTX* c) noexcept : ctx(c) {}
+    ~AsioSSLContextWrapper() noexcept { if (ctx) SSL_CTX_free(ctx); }
+    AsioSSLContextWrapper(const AsioSSLContextWrapper&) = delete;
+    AsioSSLContextWrapper& operator=(const AsioSSLContextWrapper&) = delete;
+    
+    SSL_CTX* native_handle() const noexcept { return ctx; }
+};
+
+[[nodiscard]] inline std::shared_ptr<AsioSSLContextWrapper> init_tls_server_context(
     std::string_view cert, std::string_view key, std::string_view ca) noexcept {
-    return init_tls_context({cert, key, ca, true, true});
+    SSL_CTX* raw = init_tls_context({cert, key, ca, true, true});
+    if (!raw) return nullptr;
+    return std::make_shared<AsioSSLContextWrapper>(raw);
 }
 
-[[nodiscard]] inline SSL_CTX* init_tls_client_context(
+[[nodiscard]] inline std::shared_ptr<AsioSSLContextWrapper> init_tls_client_context(
     std::string_view cert, std::string_view key, std::string_view ca) noexcept {
-    return init_tls_context({cert, key, ca, false, true});
+    SSL_CTX* raw = init_tls_context({cert, key, ca, false, true});
+    if (!raw) return nullptr;
+    return std::make_shared<AsioSSLContextWrapper>(raw);
 }
 #endif

@@ -1,11 +1,13 @@
 #pragma once
 #include <string>
-#include <span>
-#include <iostream>
-#include <algorithm>
-#include <mutex>
-#include <vector>
-#include <openssl/ssl.h>
+#include <functional>
+#include <memory>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <system_error>
+#include <arpa/inet.h>
+#include <netdb.h>
 
 #include "common_util.h"
 #include "client_crypto_util.h"
@@ -47,6 +49,7 @@ inline bool setup_session_id(std::span<char *> args)
     std::cout << "Generated new session_id: " << session_id << "\n";
     return true;
 }
+
 
 // --- 4. Single connection attempt ---
 inline int attempt_connection(const std::string &server, int port,

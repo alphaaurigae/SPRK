@@ -1,9 +1,13 @@
-#pragma once
+#ifndef CLIENT_CMDLINE_H
+#define CLIENT_CMDLINE_H
+
+#include "shared_common_util.h"
+
 #include <string>
 #include <span>
-#include "common_util.h"
 #include <iostream>
 #include <cstdlib>
+
 
 // --- 1. Command line parsing ---
 struct ConnectionConfig
@@ -63,3 +67,4 @@ inline ConnectionConfig parse_command_line_args(std::span<char *> args)
 
     return config;
 }
+#endif

@@ -1,5 +1,5 @@
-#ifndef NET_COMMON_PROTOCOL_H
-#define NET_COMMON_PROTOCOL_H
+#ifndef SHARED_NET_COMMON_PROTOCOL_H
+#define SHARED_NET_COMMON_PROTOCOL_H
 
 #include <array>
 #include <cstdint>
@@ -24,6 +24,10 @@ constexpr uint8_t ALGO_MLDSA87    = 13;
 
 constexpr size_t MAX_PQC_PUBKEY_LEN = 8192;
 constexpr size_t MAX_PQC_SIG_LEN    = 8192;
+inline constexpr char KEM_ALG_NAME[] = "Kyber512";
+inline constexpr char SIG_ALG_NAME[] = "ML-DSA-87";
+// shared_net_tls_context.h (add near the top, after includes)
+constexpr uint8_t ALGO_KEM_ALG_NAME = ALGO_KYBER512;
 
 constexpr size_t NONCE_LEN      = 12;
 constexpr size_t MAX_CIPHER     = 65535;

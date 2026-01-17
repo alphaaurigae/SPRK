@@ -1,6 +1,6 @@
-// common_util.h
-#ifndef COMMON_UTIL_H
-#define COMMON_UTIL_H
+#ifndef SHARED_COMMON_UTIL_H
+#define SHARED_COMMON_UTIL_H
+
 #include <array>
 #include <cctype>
 #include <cerrno>
@@ -13,18 +13,13 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
 #include <iostream>
 #include <fstream>
-
 #include <atomic>
-
 #include <ctime>
 #include <format>
-
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-
 #include <asio.hpp>
 
 inline std::atomic_bool debug_mode{false};

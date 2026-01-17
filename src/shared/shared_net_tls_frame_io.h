@@ -1,8 +1,8 @@
-// net_tls_frame_io.h
-#ifndef NET_TLS_FRAME_IO_H
-#define NET_TLS_FRAME_IO_H
+#ifndef SHARED_NET_TLS_FRAME_IO_H
+#define SHARED_NET_TLS_FRAME_IO_H
 
-#include "common_util.h"
+#include "shared_common_util.h"
+
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <vector>

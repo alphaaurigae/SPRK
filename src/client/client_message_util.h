@@ -1,28 +1,40 @@
-#pragma once
-#include "session.h"
-#include "peer_manager.h"
-#include "common_util.h"
-#include "net_tls_frame_io.h"
-#include "net_key_util.h"
-#include "commands.h"
+#ifndef CLIENT_MESSAGE_UTIL_H
+#define CLIENT_MESSAGE_UTIL_H
+
+#include "client_session.h"
+#include "client_peer_manager.h"
+#include "shared_common_util.h"
+#include "shared_common_crypto.h"
+#include "shared_net_tls_frame_io.h"
+#include "shared_net_key_util.h"
+#include "client_commands.h"
+#include "client_peer_disconnect.h"
 
 #include <string>
 #include <vector>
 #include <mutex>
 #include <algorithm>
 #include <iostream>
+#include <unordered_set>
 
 
 
 void handle_hello(const Parsed &p, int sock)
 {
     const std::string peer_name = trim(p.username);
+    std::cerr << "[CLIENT] Received hello from " << peer_name << "\n";
+  
     const auto ms = get_current_timestamp_ms();
     if (!validate_username(peer_name, ms)) return;
     
     const std::lock_guard<std::mutex> lk(peers_mtx);
     std::string peer_fp_hex;
-    const std::string peer_key = compute_peer_key(p, peer_fp_hex);
+    const auto peer_key_opt = compute_peer_key(p, peer_fp_hex);
+    if (!peer_key_opt.has_value()) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: hello without identity_pk from " + peer_name);
+        return;
+    }
+    const std::string peer_key = peer_key_opt.value();
     auto &pi = peers[peer_key];
     auto &fps_set = fps_by_username[peer_name];
     update_peer_info(pi, peer_name, peer_fp_hex, fps_set);
@@ -44,7 +56,11 @@ void handle_hello(const Parsed &p, int sock)
     if (!get_expected_lengths(expected, ms)) return;
     if (!validate_eph_pk_length(p, expected.pk_len, peer_name, ms)) return;
     
-    const std::string key_context = build_key_context_for_peer(peer_fp_hex, peer_name);
+       const std::string key_context = build_key_context_for_peer(
+        my_fp_hex,
+        peer_fp_hex,
+        p.session_id
+    );
     const bool was_ready = pi.ready;
     const bool i_am_initiator = !peer_fp_hex.empty() && (my_fp_hex < peer_fp_hex);
     
@@ -64,8 +80,22 @@ void handle_hello(const Parsed &p, int sock)
                 std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
             }
         }
-    } else if (!i_am_initiator && p.encaps.empty() && pi.ready) {
-        dev_println("[" + std::to_string(ms) + "] responder confirmed ready for " + peer_name);
+    } else if (!i_am_initiator) {
+        if (!p.encaps.empty()) {
+            if (handle_encaps_present(pi, p, expected.ct_len, key_context, peer_name, ms)) {
+                if (!was_ready && pi.ready) {
+                    std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
+                    const std::vector<unsigned char> req{PROTO_VERSION, MSG_LIST_REQUEST};
+                    const auto frame = build_frame(req);
+                    std::lock_guard<std::mutex> lk(ssl_io_mtx);
+                    tls_full_send(ssl, frame.data(), frame.size());
+                }
+            }
+        } else if (pi.ready) {
+            dev_println("[" + std::to_string(ms) + "] responder confirmed ready for " + peer_name);
+        } else {
+            log_awaiting_encaps(peer_name, ms);
+        }
     } else {
         log_awaiting_encaps(peer_name, ms);
     }
@@ -83,18 +113,13 @@ void handle_chat(const Parsed &p)
         return;
     }
 
-    std::string peer_key;
-    if (!p.identity_pk.empty()) [[likely]]
-    {
-        peer_key = to_hex(p.identity_pk.data(), p.identity_pk.size());
-    }
-    else [[unlikely]]
-    {
-        dev_println(
-            "[" + std::to_string(ms) +
-            "] REJECTED: peer must be identified by fingerprint, not username");
-        return;
-    }
+    if (p.identity_pk.empty()) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: chat without sender fingerprint");
+         return;
+     }
+    
+    const std::string peer_key = to_hex(p.identity_pk.data(), p.identity_pk.size());
+ 
 
     const auto it = peers.find(peer_key);
     if (it == peers.end()) [[unlikely]]
@@ -175,10 +200,17 @@ const bool jitter_detected = is_sequence_in_jitter_range(p.seq, pi.recv_seq,
                 pi.identity_pk.begin(), pi.identity_pk.end()));
             sender_fp_hex = fingerprint_to_hex(fp);
         }
+ 
+    // Decrypt: AAD must use same sorted order as encryption defined in shared_common_crypto.h struct AADBuilder
+    const std::string aad_s = AADBuilder{
+        my_fp_hex,      // me (receiver) - local_fp
+        sender_fp_hex   // sender (peer) - remote_fp
+    }.build_for_seq(p.seq);
 
-        const std::string aad_s = make_symmetric_message_aad(
-    my_fp_hex, pi.peer_fp_hex, p.seq);
         std::vector<unsigned char> aad(aad_s.begin(), aad_s.end());
+
+        std::cerr << "[CLIENT] Decrypting from " << peer_from
+                  << " AAD=" << aad_s << "\n";
 
         const auto pt = aead_decrypt(pi.sk.key, p.ciphertext, aad, p.nonce);
         if (pt.empty() || pt.size() > 65535) [[unlikely]]
@@ -208,6 +240,7 @@ const bool jitter_detected = is_sequence_in_jitter_range(p.seq, pi.recv_seq,
 
             std::cout << "[" << ts << "] [" << peer_from << " " << shortfp
                       << "] " << msg << "\n";
+            std::cout.flush();  // Force immediate display
         }
 
         pi.recv_seq++;
@@ -302,6 +335,7 @@ inline std::vector<std::string> find_matching_peers(const std::string &token)
     return matches;
 }
 
+// Enforce Fingerprint-Only Recipient Resolution
 inline std::vector<std::string>
 resolve_fingerprint_recipients(const std::vector<std::string> &recipients)
 {
@@ -310,17 +344,21 @@ resolve_fingerprint_recipients(const std::vector<std::string> &recipients)
 
     for (const auto &token : recipients)
     {
-        if (!is_valid_hex_token(token))
-        {
-            std::cout << "REJECTED: recipient must be a hex fingerprint "
-                      << token << "\n";
+        if (!is_valid_hex_token(token)) {
+            std::cout << "REJECTED: recipient must be hex fingerprint prefix (got: " 
+                      << token << ")\n";
             continue;
         }
 
         const auto matches = find_matching_peers(token);
 
-        if (matches.size() == 1)
-        {
+        if (matches.size() == 1) {
+            const auto &fp = matches[0];
+            if (fp.starts_with("uname:")) {
+                std::cout << "REJECTED: cannot send to non-verified peer " 
+                          << token << "\n";
+                continue;
+            }
             resolved.push_back(matches[0]);
         }
         else if (matches.empty())
@@ -335,6 +373,18 @@ resolve_fingerprint_recipients(const std::vector<std::string> &recipients)
         }
     }
     return resolved;
+}
+
+// Add Session Binding Validation
+[[nodiscard]] inline bool validate_session_binding(
+    const std::string &my_fp,
+    const std::string &peer_fp,
+    const std::string &session_id_a,
+    const std::string &session_id_b) noexcept
+{
+    if (my_fp.empty() || peer_fp.empty()) return false;
+    if (session_id_a.empty() || session_id_b.empty()) return false;
+    return session_id_a == session_id_b;
 }
 
 inline std::vector<std::string>
@@ -387,6 +437,7 @@ const auto frame =
         if (tls_full_send(ssl, frame.data(), frame.size()) <= 0)
         {
             is_connected = false;
+            handle_disconnect(ctx.target_username, recipient_fp.value);
             return false;
         }
     }
@@ -404,3 +455,4 @@ const auto frame =
 
     return true;
 }
+#endif

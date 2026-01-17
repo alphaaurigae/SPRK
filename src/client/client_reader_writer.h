@@ -1,17 +1,20 @@
-#pragma once
+#ifndef CLIENT_READER_WRITER_H
+#define CLIENT_READER_WRITER_H
 
 #include "client_runtime.h"
-#include "common_crypto.h"
-#include "net_tls_frame_io.h"
-#include "net_common_protocol.h"
-#include "common_util.h"
-#include "net_key_util.h"
-#include "peer_manager.h"       // check_rate_limit, peers, PeerInfo
-#include "session.h"            // session_id, my_eph_pk, my_username
-#include "client_message_util.h" // validate_username, handle_hello, etc.
-#include "client_crypto_util.h"  // ssl_ctx, rotate_ephemeral_if_needed
+#include "client_peer_disconnect.h"
+#include "shared_common_crypto.h"
+#include "shared_net_tls_frame_io.h"
+#include "shared_net_common_protocol.h"
+#include "shared_common_util.h"
+#include "shared_net_key_util.h"
+#include "client_peer_manager.h"
+#include "client_session.h"
+#include "client_message_util.h"
+#include "client_crypto_util.h"
 
-
+#include <poll.h>
+#include <unistd.h>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -30,6 +33,7 @@ inline void reader_thread(int sock, SSL* ssl)
         if (!tls_peek_and_read_frame(ssl, frame))
         {
             is_connected = false;
+            handle_disconnect("(unknown)", ""); // reader thread TLS read failed
             break;
         }
 
@@ -67,29 +71,68 @@ inline void reader_thread(int sock, SSL* ssl)
 inline void writer_thread(int sock, SSL* ssl)
 {
     std::string line;
-    bool eof_notified = false;
+
 
     while (is_connected.load(std::memory_order_acquire))
     {
+        // Non-blocking poll on stdin with yield to allow reader output
+        struct pollfd pfd;
+        pfd.fd = STDIN_FILENO;
+        pfd.events = POLLIN;
+        
+        const int poll_result = poll(&pfd, 1, 50);  // 50ms timeout (shorter)
+        
+        if (poll_result < 0) {
+            if (errno == EINTR) continue;
+            std::cerr << "[" << get_current_timestamp_ms() 
+                      << "] poll error: " << strerror(errno) << "\n";
+            break;
+        }
+        
+        if (poll_result == 0) {
+            // No input available, yield to allow reader thread to display messages
+            std::this_thread::yield();
+            continue;
+        }
+        
+        // Check if POLLIN event is actually set (not just timeout/error)
+        if (!(pfd.revents & POLLIN)) {
+            continue;
+        }
+        
+        // Input available, read it
         if (!std::getline(std::cin, line))
+
+
+
+
         {
             if (std::cin.eof())
             {
-                if (!eof_notified)
-                {
-                    std::cerr << "[" << get_current_timestamp_ms() << "] writer_thread: stdin EOF; entering poll mode\n";
-                    eof_notified = true;
-                }
+                std::cerr << "[" << get_current_timestamp_ms() 
+                          << "] stdin closed\n";
+
                 std::cin.clear();
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                is_connected.store(false, std::memory_order_release);
+                break;
+
+
+
+            }
+
+            
+            if (std::cin.fail()) {
+                std::cerr << "[" << get_current_timestamp_ms() 
+                          << "] getline failed\n";
+                std::cin.clear();
                 continue;
             }
-            std::cerr << "[" << get_current_timestamp_ms() << "] writer_thread: std::getline failed\n";
+         
+
             is_connected.store(false, std::memory_order_release);
             break;
         }
 
-        eof_notified = false;
 
         if (!is_connected.load(std::memory_order_acquire)) break;
 
@@ -137,5 +180,5 @@ inline void writer_thread(int sock, SSL* ssl)
             }
         }
     }
-// Do not close the socket here. Let main/connection loop perform orderly shutdown.
 }
+#endif

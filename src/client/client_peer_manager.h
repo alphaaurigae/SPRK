@@ -1,10 +1,11 @@
-#pragma once
+#ifndef CLIENT_PEER_MANAGER_H
+#define CLIENT_PEER_MANAGER_H
 
 #include "client_runtime.h"
-#include "common_crypto.h"
-#include "net_common_protocol.h"
-#include "common_util.h"
-#include "net_key_util.h"
+#include "shared_common_crypto.h"
+#include "shared_net_common_protocol.h"
+#include "shared_common_util.h"
+#include "shared_net_key_util.h"
 
 
 #include <unordered_map>
@@ -17,6 +18,7 @@
 struct PeerInfo
 {
     std::string   username;
+    std::string   bound_session_id;
     secure_vector eph_pk;
     secure_vector identity_pk;
     std::string   peer_fp_hex;
@@ -123,3 +125,5 @@ void update_keys_and_log_connect(PeerInfo &pi, const Parsed &p,
     std::cout << "[" << ts << "] connect " << peer_name << " pubkey=" << shortpk
               << "\n";
 }
+
+#endif

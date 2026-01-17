@@ -1,5 +1,5 @@
-#ifndef NET_USERNAME_UTIL_H
-#define NET_USERNAME_UTIL_H
+#ifndef SHARED_NET_USERNAME_UTIL_H
+#define SHARED_NET_USERNAME_UTIL_H
 
 #include <algorithm>
 #include <cctype>

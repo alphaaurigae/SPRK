@@ -1,17 +1,18 @@
-#pragma once
+#ifndef CLIENT_CRYPTO_UTIL_H
+#define CLIENT_CRYPTO_UTIL_H
 
 #include "client_runtime.h"
-#include "common_crypto.h"
-#include "net_common_protocol.h"
-#include "common_util.h"
-#include "net_tls_context.h"
-#include "net_socket_util.h"
-#include "net_tls_frame_io.h"
-#include "net_username_util.h"
-#include "net_rekey_util.h"
-#include "net_message_util.h"
-#include "net_key_util.h"
-#include "peer_manager.h"
+#include "shared_common_crypto.h"
+#include "shared_net_common_protocol.h"
+#include "shared_common_util.h"
+#include "shared_net_tls_context.h"
+#include "shared_net_socket_util.h"
+#include "shared_net_tls_frame_io.h"
+#include "shared_net_username_util.h"
+#include "shared_net_rekey_util.h"
+#include "shared_net_message_util.h"
+#include "shared_net_key_util.h"
+#include "client_peer_manager.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -62,15 +63,13 @@ inline bool init_oqs_provider()
 
 struct KeyPath { std::string value; };
 struct AlgorithmName { std::string value; };
-
 static void rotate_ephemeral_if_needed([[maybe_unused]] int sock, const std::string &peer_fp)
 {
     bool do_rotate = false;
     {
         const std::lock_guard<std::mutex> lk(peers_mtx);
-        const auto                        it = peers.find(peer_fp);
+        const auto it = peers.find(peer_fp);
         if (it != peers.end() && should_rekey(it->second.send_seq, REKEY_INTERVAL))
-
         {
             do_rotate = true;
         }
@@ -78,46 +77,42 @@ static void rotate_ephemeral_if_needed([[maybe_unused]] int sock, const std::str
     if (!do_rotate)
         return;
 
+    // ---- REMOVE THE rtm LINE COMPLETELY ----
+    // We keep the timer code in main.cpp only, so no "rtm" here
+
     const auto ms = get_current_timestamp_ms();
-
-    auto          eph_pair = pqkem_keypair("Kyber512");
-    secure_vector new_pk   = eph_pair.first;
-    secure_vector new_sk   = eph_pair.second;
-
+    auto eph_pair = pqkem_keypair(KEM_ALG_NAME);
+    secure_vector new_pk = eph_pair.first;
+    secure_vector new_sk = eph_pair.second;
     std::vector<unsigned char> sig_data;
     sig_data.reserve(new_pk.size() + session_id.size());
     sig_data.insert(sig_data.end(), new_pk.begin(), new_pk.end());
     sig_data.insert(sig_data.end(), session_id.begin(), session_id.end());
-
     const std::vector<unsigned char> signature_vec =
-        pqsig_sign("ML-DSA-87",
+        pqsig_sign(SIG_ALG_NAME,
                    std::vector<unsigned char>(my_identity_sk.begin(),
                                               my_identity_sk.end()),
                    sig_data);
-
     const std::vector<unsigned char> identity_pk_vec(my_identity_pk.begin(),
                                                      my_identity_pk.end());
     const std::vector<unsigned char> empty_encaps;
-    const auto                       hello_frame = build_hello(
-        my_username, ALGO_KYBER512,
+    const auto hello_frame = build_hello(
+        my_username, ALGO_KEM_ALG_NAME,
         std::vector<unsigned char>(new_pk.begin(), new_pk.end()), ALGO_MLDSA87,
         identity_pk_vec, signature_vec, empty_encaps, session_id);
-
     tls_full_send(ssl, hello_frame.data(), hello_frame.size());
-
     {
         const std::lock_guard<std::mutex> lk(peers_mtx);
-        my_eph_pk     = new_pk;
-        my_eph_sk     = new_sk;
+        my_eph_pk = new_pk;
+        my_eph_sk = new_sk;
         const auto it = peers.find(peer_fp);
         if (it != peers.end())
         {
-            auto &pi    = it->second;
+            auto &pi = it->second;
             pi.send_seq = 0;
-            pi.ready    = false;
+            pi.ready = false;
         }
     }
-
     dev_println("[" + std::to_string(ms) +
                 "] rotated ephemeral key for peer_fp " + peer_fp);
 }
@@ -131,7 +126,7 @@ static bool check_hello_signature(const Parsed &p, const std::string &peer_name,
 
     const bool sig_ok =
         (p.id_alg == ALGO_MLDSA87)
-            ? pqsig_verify("ML-DSA-87", p.identity_pk, sig_data, p.signature)
+            ? pqsig_verify(SIG_ALG_NAME, p.identity_pk, sig_data, p.signature)
             : false;
     if (!sig_ok)
         dev_println("[" + std::to_string(ms) +
@@ -139,11 +134,18 @@ static bool check_hello_signature(const Parsed &p, const std::string &peer_name,
     return sig_ok;
 }
 
-static std::string build_key_context_for_peer(const std::string &peer_fp_hex_ref, const std::string &peer_name)
+
+// AAD Context Construction
+static std::string build_key_context_for_peer(const std::string &my_fp, const std::string &peer_fp_hex_ref, const std::string &session_id_val)
 {
-    return !my_fp_hex.empty() && !peer_fp_hex_ref.empty()
-        ? build_key_derivation_context(my_fp_hex, peer_fp_hex_ref)
-        : build_username_context(my_username, peer_name);
+    if (my_fp.empty() || peer_fp_hex_ref.empty() || session_id_val.empty()) {
+        throw std::runtime_error("invalid key context parameters");
+    }
+    
+        std::string a = my_fp;
+         std::string b = peer_fp_hex_ref;
+         if (a > b) std::swap(a, b);
+         return a + "|" + b + "|" + session_id_val;
 }
 
 static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
@@ -154,8 +156,11 @@ static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
     try
     {
         const secure_vector shared =
-            pqkem_decaps("Kyber512", p.encaps, my_eph_sk);
+            pqkem_decaps(KEM_ALG_NAME, p.encaps, my_eph_sk);
         pi.sk = derive_shared_key_from_secret(shared, key_context);
+        std::cerr << "[KEY] Derived for " << peer_name
+                  << " key=" << to_hex(pi.sk.key).substr(0,32)
+                  << " context=" << key_context << " (encaps)\n";
         dev_println("[" + std::to_string(ms) +
                     "] DEBUG decaps: my=" + my_username + " peer=" + peer_name +
                     " context=" + key_context +
@@ -188,13 +193,17 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p, const std
 
         // Fixed: proper function call syntax (no stray ... and no extra comma)
         const auto enc_pair = pqkem_encaps(
-            "Kyber512",
+            KEM_ALG_NAME,
             std::vector<unsigned char>(pi.eph_pk.begin(), pi.eph_pk.end()));
 
         const std::vector<unsigned char> encaps_ct = enc_pair.first;
         const secure_vector shared = enc_pair.second;
 
         pi.sk = derive_shared_key_from_secret(shared, key_context);
+        std::cerr << "[KEY] Derived for " << peer_name
+                  << " key=" << to_hex(pi.sk.key).substr(0,32)
+                  << " context=" << key_context << " (encaps)\n";
+
         dev_println("[" + std::to_string(ms) +
                     "] DEBUG encaps: my=" + my_username + " peer=" + peer_name +
                     " context=" + key_context +
@@ -210,7 +219,7 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p, const std
                          p.session_id.end());
 
         const std::vector<unsigned char> signature_vec =
-            pqsig_sign("ML-DSA-87",
+            pqsig_sign(SIG_ALG_NAME,
                        std::vector<unsigned char>(my_identity_sk.begin(),
                                                   my_identity_sk.end()),
                        sig_data2);
@@ -218,7 +227,7 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p, const std
         const std::vector<unsigned char> identity_pk_vec(my_identity_pk.begin(),
                                                          my_identity_pk.end());
         const auto                       reply = build_hello(
-            my_username, ALGO_KYBER512,
+            my_username, ALGO_KEM_ALG_NAME,
             std::vector<unsigned char>(my_eph_pk.begin(), my_eph_pk.end()),
             ALGO_MLDSA87, identity_pk_vec, signature_vec, encaps_ct,
             p.session_id);
@@ -251,6 +260,11 @@ bool validate_username(const std::string &peer_name, uint64_t ms)
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: self-connection attempt");
+        return false;
+    }
+    // Prevent Self-Session Exploits
+    if (peer_name == my_username) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: self-messaging blocked");
         return false;
     }
     return true;
@@ -292,7 +306,7 @@ struct ExpectedLengths
 bool get_expected_lengths(ExpectedLengths &lengths, uint64_t ms)
 {
 #ifdef USE_LIBOQS
-    OQS_KEM *kem = OQS_KEM_new("Kyber512");
+    OQS_KEM *kem = OQS_KEM_new(KEM_ALG_NAME);
     if (kem == nullptr)
     {
         dev_println("[" + std::to_string(ms) + "] REJECTED: kem init failed");
@@ -366,3 +380,5 @@ void log_ready_if_new(const PeerInfo &pi, const std::string &peer_name,
         std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
     }
 }
+
+#endif

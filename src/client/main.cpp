@@ -1,22 +1,22 @@
-#include "net_tls_context.h"
-#include "common_crypto.h"
-#include "net_common_protocol.h"
-#include "common_util.h"
+#include "shared_net_tls_context.h"
+#include "shared_common_crypto.h"
+#include "shared_net_common_protocol.h"
+#include "shared_common_util.h"
+#include "shared_net_socket_util.h"
+#include "shared_net_tls_frame_io.h"
+#include "shared_net_username_util.h"
+#include "shared_net_rekey_util.h"
+#include "shared_net_message_util.h"
+#include "shared_net_key_util.h"
 
-#include "net_socket_util.h"
-#include "net_tls_frame_io.h"
-#include "net_username_util.h"
-#include "net_rekey_util.h"
-#include "net_message_util.h"
-#include "net_key_util.h"
-#include "peer_manager.h"
-#include "reader_writer.h"
-#include "commands.h"
-#include "session.h"
-#include "client_cmdline_util.h"   // parse_command_line_args
-#include "client_crypto_util.h"    // ssl_ctx, ssl, init_oqs_provider, rotate_ephemeral_if_needed
-#include "client_message_util.h"   // handle_hello, handle_chat, process_list_response, process_pubkey_response, etc.
-#include "reader_writer.h"         // reader_thread, writer_thread
+#include "client_peer_manager.h"
+#include "client_reader_writer.h"
+#include "client_commands.h"
+#include "client_session.h"
+#include "client_cmdline_util.h"
+#include "client_crypto_util.h"
+#include "client_message_util.h"
+#include "client_reader_writer.h"
 #include "client_runtime.h"
 
 
@@ -47,7 +47,7 @@
 #include <openssl/err.h>
 #include <openssl/provider.h> 
 #include <csignal>
-
+#include <asio.hpp>
 
 
 
@@ -75,6 +75,13 @@ try
     {
         return 1;
     }
+
+    asio::io_context io;
+    RekeyTimeoutManager rtm(io);  // Initialize with io
+
+    std::thread io_thread([&io] {
+        io.run();  // Run Asio event loop for timers
+    });
 
     if (args.size() < 6)
     {
@@ -116,6 +123,7 @@ if (!init_oqs_provider()) {
     secure_vector persisted_eph_pk;
     secure_vector persisted_eph_sk;
     bool          have_persisted_eph = false;
+    asio::io_context backoff_io;
 
     uint32_t reconnect_attempts = 0;
 
@@ -128,8 +136,17 @@ if (!init_oqs_provider()) {
                 MAX_BACKOFF_MS);
             std::cout << "[" << get_current_timestamp_ms() << "] reconnecting in " << backoff
                       << "ms (attempt " << reconnect_attempts + 1 << ")\n";
-            std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
-        }
+
+            
+            OneShotTimer backoff_timer(backoff_io);
+            std::atomic<bool> backoff_done{false};
+            backoff_timer.start(std::chrono::milliseconds(backoff), 
+                [&](const std::error_code&) { backoff_done = true; });
+            
+            while (!backoff_done) {
+                backoff_io.poll_one();
+              }
+         }
 
         const int s = attempt_connection(config.server, config.port, persisted_eph_pk,
                                          persisted_eph_sk, have_persisted_eph);
@@ -193,6 +210,8 @@ if (!init_oqs_provider()) {
             ssl = nullptr;
         }
     }
+    io.stop();
+    if (io_thread.joinable()) io_thread.join();
 
     ssl_ctx.reset();  // shared_ptr releases the context automatically
 

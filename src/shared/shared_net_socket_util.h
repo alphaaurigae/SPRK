@@ -1,5 +1,5 @@
-#ifndef NET_SOCKET_UTIL_H
-#define NET_SOCKET_UTIL_H
+#ifndef SHARED_NET_SOCKET_UTIL_H
+#define SHARED_NET_SOCKET_UTIL_H
 
 #include <asio.hpp>
 #include <cerrno>

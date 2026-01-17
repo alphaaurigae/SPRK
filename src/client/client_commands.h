@@ -1,16 +1,20 @@
-#pragma once
+#ifndef CLIENT_COMMANDS_H
+#define CLIENT_COMMANDS_H
 
 #include "client_runtime.h"
+#include "shared_common_util.h"
+#include "client_peer_manager.h"
+#include "shared_net_message_util.h"
+#include "shared_net_tls_frame_io.h"
+#include "client_peer_disconnect.h"
+
 #include <string>
 #include <vector>
 #include <iostream>
 #include <algorithm>
 #include <mutex>
 #include <openssl/ssl.h>
-#include "common_util.h"
-#include "peer_manager.h"
-#include "net_message_util.h"
-#include "net_tls_frame_io.h"
+
 
 
 // Strong type to prevent swapping msg and recipient_fp
@@ -74,6 +78,7 @@ inline bool handle_client_command(const std::string &line,
             if (tls_full_send(ssl, f.data(), f.size()) <= 0)
             {
                 is_connected = false;
+                handle_disconnect("", ""); // list request fails, we may not know peer yet
             }
         }
         {
@@ -95,6 +100,7 @@ inline bool handle_client_command(const std::string &line,
             if (tls_full_send(ssl, req.data(), req.size()) <= 0)
             {
                 is_connected = false;
+                handle_disconnect(who, ""); // pubk request fails, clean any partial state
             }
         }
         return true;
@@ -102,3 +108,5 @@ inline bool handle_client_command(const std::string &line,
 
     return false;
 }
+
+#endif

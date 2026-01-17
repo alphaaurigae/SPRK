@@ -1,4 +1,6 @@
-#pragma once
+#ifndef SERVER_CONNECTION_H
+#define SERVER_CONNECTION_H
+
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
@@ -55,6 +57,18 @@ inline void cleanup_disconnected_client(
     if (iit != sd.fingerprint_hex_by_fd.end())
         fp_hex = iit->second;
 
+    // ADD LOGGING HERE (replace the old simple "disconnect" line)
+    auto ts = get_current_timestamp_ms();
+    if (!nick.empty()) {
+        std::cout << "[" << ts << "] DISCONNECT " << nick 
+                  << " session=" << sid
+                  << (fp_hex.empty() ? "" : " fingerprint=" + fp_hex.substr(0, 10))
+                  << "\n";
+    } else {
+        std::cout << "[" << ts << "] DISCONNECT fd=" << client_fd 
+                  << " session=" << sid << "\n";
+    }
+
     if (!fp_hex.empty()) {
         sd.fd_by_fingerprint.erase(fp_hex);
         sd.nick_by_fingerprint.erase(fp_hex);
@@ -74,7 +88,8 @@ inline void cleanup_disconnected_client(
     auto it = std::find_if(clients.begin(), clients.end(),
                            [client_fd](const ClientState& cs) { return cs.fd == client_fd; });
     if (it != clients.end()) {
-        std::cout << "disconnect " << nick << " session=" << sid << "\n";
+        // REMOVE this old logging line since we added better logging above
+        // std::cout << "disconnect " << nick << " session=" << sid << "\n";
         clients.erase(it);
     }
 }
@@ -136,4 +151,4 @@ static void process_client_events(const fd_set& rfds,
         }
     }
 }
-
+#endif

@@ -1,5 +1,6 @@
-// server/client_state.h
-#pragma once
+#ifndef SERVER_CLIENT_STATE_H
+#define SERVER_CLIENT_STATE_H
+
 #include <vector>
 #include <algorithm>
 #include <unistd.h>
@@ -84,3 +85,4 @@ static void prune_invalid_clients(std::vector<ClientState>& clients) {
                                  }),
                   clients.end());
 }
+#endif

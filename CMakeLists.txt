@@ -294,6 +294,12 @@ set(LIBS_MAIN
   crypto
   ${OQS_LIB}
   pthread
+PocoData
+PocoJSON
+PocoXML
+PocoNet
+PocoUtil
+PocoFoundation
 )
 
 # per bin

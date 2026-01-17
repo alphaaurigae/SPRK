@@ -1,18 +1,18 @@
-#include "common_crypto.h"
-#include "net_common_protocol.h"
-#include "common_util.h"
-#include "net_tls_context.h"
-#include "net_socket_util.h"
-#include "net_tls_frame_io.h"
-#include "net_username_util.h"
-#include "net_rekey_util.h"
-#include "net_message_util.h"
-#include "net_key_util.h"
+#include "shared_common_crypto.h"
+#include "shared_net_common_protocol.h"
+#include "shared_common_util.h"
+#include "shared_net_tls_context.h"
+#include "shared_net_socket_util.h"
+#include "shared_net_tls_frame_io.h"
+#include "shared_net_username_util.h"
+#include "shared_net_rekey_util.h"
+#include "shared_net_message_util.h"
+#include "shared_net_key_util.h"
 
-#include "server/client_state.h"
-#include "server/session.h"
-#include "server/handlers.h"
-#include "server/connection.h"
+#include "server/server_client_state.h"
+#include "server/server_session.h"
+#include "server/server_handlers.h"
+#include "server/server_connection.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -29,7 +29,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/provider.h> 
-
+#include <asio.hpp> 
 
 int main(int argc, char **argv)
 {
@@ -78,6 +78,13 @@ auto ctx = init_tls_server_context(
 
     std::cout << "Server listening on port " << port << " with post-quantum TLS\n";
 
+    asio::io_context io;
+    RekeyTimeoutManager rtm(io);
+
+    std::thread io_thread([&io] {
+        io.run();
+    });
+
     while (true) {
         prune_invalid_clients(clients);
 
@@ -89,6 +96,8 @@ auto ctx = init_tls_server_context(
         if (r < 0) {
             perror("select");
             break;
+        } else if (r == 0) {
+            io.poll();  // Process Asio timers/events on timeout
         }
 
         if (FD_ISSET(listen_fd, &rfds)) {
@@ -112,6 +121,8 @@ clients.clear();
         ssl_obj = nullptr;
     }
 
+    io.stop();
+    if (io_thread.joinable()) io_thread.join();
     ctx.reset();
 close(listen_fd);
 return 0;

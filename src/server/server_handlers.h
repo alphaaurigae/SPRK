@@ -1,17 +1,21 @@
-#pragma once
+#ifndef SERVER_HANDLERS_H
+#define SERVER_HANDLERS_H
+
+#include "server_session.h"
+
 #include <vector>
 #include <string>
 #include <unordered_map>
-
-#include "session.h"
 
 
 static void broadcast_hello_to_peers(const SessionData &sd, int client_fd,
                                      const std::vector<unsigned char> &frame,
                                      const std::vector<ClientState>& clients)
 {
+    auto ts = get_current_timestamp_ms();
     for (const auto &kv : sd.fd_by_nick)
     {
+        std::cerr << "[" << ts << "] [SERVER] Checking broadcast to " << kv.first << " (fd=" << kv.second << ")\\n";  // Debug
         int dst_fd = kv.second;
         if (dst_fd == client_fd) continue;
 
@@ -19,9 +23,12 @@ static void broadcast_hello_to_peers(const SessionData &sd, int client_fd,
                                [dst_fd](const ClientState& cs) { return cs.fd == dst_fd; });
         if (it != clients.end()) {
             tls_full_send(it->ssl, frame.data(), frame.size());
+            std::cerr << "[" << ts << "] [SERVER] Broadcast hello from fd=" << client_fd
+                      << " to fd=" << dst_fd << "\n";
         }
     }
 }
+
 
 inline bool handle_hello_message(const ClientState& client_state,
                                  const Parsed &p,
@@ -35,6 +42,7 @@ inline bool handle_hello_message(const ClientState& client_state,
     std::string uname;
     std::string sid;
     std::string error = validate_hello_basics(p, uname, sid);
+    std::cerr << "[SERVER] Hello from " << uname << " session=" << sid << " (error: " << error << ")\\n";  // Debug
 
     if (!error.empty())
     {
@@ -50,11 +58,28 @@ inline bool handle_hello_message(const ClientState& client_state,
         return false;
     }
 
+
     cleanup_old_nickname(sd, client_fd, uname);
+
+    // register first so broadcast sees this client
     register_client(sd, client_fd, uname, p, frame);
+    std::cerr << "[SERVER] Registered client fd=" << client_fd << " uname=" << uname << "\\n";  // Debug
+
+    // cache hello by fingerprint
+    if (!p.identity_pk.empty()) {
+        const std::string fhex = compute_fingerprint_hex(p.identity_pk);
+        sd.hello_message_by_fingerprint[fhex] = frame;
+    }
 
     session_by_fd[client_fd] = sid;
-    std::cout << "connect " << uname << " session=" << sid << "\n";
+    auto ts = get_current_timestamp_ms();
+    std::string fp_display = p.identity_pk.empty() ? 
+        "(no fp)" : compute_fingerprint_hex(p.identity_pk).substr(0, 10);
+    std::cout << "[" << ts << "] CONNECT " << uname 
+              << " session=" << sid 
+              << " fingerprint=" << fp_display << "\n";
+    std::cerr << "[" << ts << "] [SERVER] Broadcasting " << uname << "'s hello to "
+              << (sd.fd_by_nick.size() - 1) << " peers\n";
 
     broadcast_hello_to_peers(sd, client_fd, frame, clients);
 
@@ -63,23 +88,31 @@ inline bool handle_hello_message(const ClientState& client_state,
     for (const auto &kv : sd.hello_message_by_fingerprint)
     {
         const std::string &existing_fp = kv.first;
-        if (!existing_fp.empty())
-        {
-            auto itn = sd.nick_by_fingerprint.find(existing_fp);
-            if (itn != sd.nick_by_fingerprint.end() && itn->second == uname)
-                continue;
-        }
+
+        if (existing_fp.empty()) continue;
+        auto itn = sd.nick_by_fingerprint.find(existing_fp);
+        if (itn != sd.nick_by_fingerprint.end() && itn->second == uname)
+            continue;
+
         const auto &existing_hello = kv.second;
-        try
+
+         try
         {
             uint32_t existing_payload_len = read_u32_be(existing_hello.data());
             Parsed p2 = parse_payload(existing_hello.data() + 4, existing_payload_len);
+            
+            // ALWAYS strip encaps when relaying to new clients
             std::vector<unsigned char> empty_encaps;
             auto stripped = build_hello(p2.username, ALGO_KYBER512, p2.eph_pk,
                                         p2.id_alg, p2.identity_pk, p2.signature,
                                         empty_encaps, p2.session_id);
             tls_full_send(client_state.ssl, stripped.data(), stripped.size());
-        }
+            
+            auto ts2 = get_current_timestamp_ms();
+            std::cerr << "[" << ts2 << "] [SERVER] Sent cached hello from " << p2.username
+                      << " to " << uname
+                      << " (fp=" << compute_fingerprint_hex(p2.identity_pk).substr(0,10) << ")\n";
+         }
         catch (...)
         {
             tls_full_send(client_state.ssl, existing_hello.data(), existing_hello.size());
@@ -218,4 +251,4 @@ inline void handle_pubkey_request(const ClientState& client_state,
     auto resp = build_pubkey_response(target, pk);
     tls_full_send(client_state.ssl, resp.data(), resp.size());
 }
-
+#endif

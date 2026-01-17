@@ -1,4 +1,8 @@
-#pragma once
+#ifndef SERVER_SESSION_H
+#define SERVER_SESSION_H
+
+#include "shared_net_common_protocol.h"
+
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -40,7 +44,7 @@ static std::string validate_hello_basics(const Parsed &p, std::string &uname,
 
     bool sig_ok =
         (p.id_alg == ALGO_MLDSA87) &&
-        pqsig_verify("ML-DSA-87", p.identity_pk, sig_data, p.signature);
+        pqsig_verify(SIG_ALG_NAME, p.identity_pk, sig_data, p.signature);
 
     if (!sig_ok)
     {
@@ -136,3 +140,4 @@ static void register_client(SessionData &sd, int client_fd,
         sd.hello_message_by_fingerprint[""] = frame;
     }
 }
+#endif

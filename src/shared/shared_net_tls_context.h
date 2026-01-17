@@ -1,6 +1,7 @@
-// net_tls_context.h
-#ifndef NET_TLS_CONTEXT_H
-#define NET_TLS_CONTEXT_H
+#ifndef SHARED_NET_TLS_CONTEXT_H
+#define SHARED_NET_TLS_CONTEXT_H
+
+#include "shared_net_common_protocol.h"
 
 #include <openssl/err.h>
 #include <openssl/provider.h>
@@ -8,6 +9,15 @@
 #include <iostream>
 #include <string_view>
 #include <memory>
+
+// Centralized TLS configuration strings (used in apply_pq_security_policy and success message)
+constexpr std::string_view TLS_HYBRID_GROUPS       = "X25519MLKEM768:X25519";
+constexpr std::string_view TLS_CIPHER_SUITES       =
+    "TLS_AES_256_GCM_SHA384:"
+    "TLS_CHACHA20_POLY1305_SHA256:"
+    "TLS_AES_128_GCM_SHA256";
+constexpr std::string_view TLS_HYBRID_KEM_DISPLAY  = "X25519MLKEM768";
+constexpr std::string_view TLS_CIPHER_DISPLAY      = "TLS 1.3 (AES-256-GCM, ChaCha20-Poly1305, AES-128-GCM)";
 
 struct SSL_CTX_Deleter {
     void operator()(SSL_CTX* ctx) const noexcept {
@@ -39,7 +49,7 @@ struct TLSContextConfig {
 
     OSSL_PROVIDER* oqsprov = OSSL_PROVIDER_load(nullptr, "oqsprovider");
     if (!oqsprov) {
-        std::cerr << "ERROR: Failed to load oqsprovider (ML-KEM768 / ML-DSA-87 missing)!\n";
+        std::cerr << "ERROR: Failed to load oqsprovider (KEM_ALG_NAME / SIG_ALG_NAME missing)!\n";
         ERR_print_errors_fp(stderr);
         OSSL_PROVIDER_unload(default_prov);
         return false;
@@ -54,15 +64,13 @@ struct TLSContextConfig {
     SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
 
     if (SSL_CTX_set_ciphersuites(ctx,
-        "TLS_AES_256_GCM_SHA384:"
-        "TLS_CHACHA20_POLY1305_SHA256:"
-        "TLS_AES_128_GCM_SHA256") != 1) {
+        TLS_CIPHER_SUITES.data()) != 1) {
         std::cerr << "Failed to set cipher suites\n";
         ERR_print_errors_fp(stderr);
         return false;
     }
 
-    if (SSL_CTX_set1_groups_list(ctx, "X25519MLKEM768:X25519") != 1) {
+    if (SSL_CTX_set1_groups_list(ctx, TLS_HYBRID_GROUPS.data()) != 1) {
         std::cerr << "ERROR: Failed to set X25519MLKEM768\n";
         ERR_print_errors_fp(stderr);
         return false;
@@ -139,8 +147,8 @@ struct TLSContextConfig {
               << "  Cert: " << config.cert_path << "\n"
               << "  Key:  " << config.key_path << "\n"
               << "  CA:   " << config.ca_path << "\n"
-              << "  Hybrid KEM: X25519MLKEM768\n"
-              << "  Cipher suites: TLS 1.3 (AES-256-GCM, ChaCha20-Poly1305, AES-128-GCM)\n";
+              << "  Hybrid KEM: " << TLS_HYBRID_KEM_DISPLAY << "\n"
+              << "  Cipher suites: " << TLS_CIPHER_DISPLAY << "\n";
 
     return ctx;
 }

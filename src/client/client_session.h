@@ -1,14 +1,14 @@
-// session.h
-#pragma once
+#ifndef CLIENT_SESSION_H
+#define CLIENT_SESSION_H
 
 #include "client_runtime.h"
-#include "common_util.h"
+#include "shared_common_util.h"
 #include "client_crypto_util.h"
-#include "net_key_util.h"
-#include "net_tls_frame_io.h"
-#include "net_username_util.h"
-#include "net_rekey_util.h"
-
+#include "shared_net_key_util.h"
+#include "shared_net_tls_frame_io.h"
+#include "shared_net_username_util.h"
+#include "shared_net_rekey_util.h"
+#include "shared_net_common_protocol.h"
 
 #include <string>
 #include <span>
@@ -62,7 +62,7 @@ inline int attempt_connection(const std::string &server, int port,
 {
     if (!have_persisted_eph)
     {
-        const auto [pk, sk] = pqkem_keypair("Kyber512");
+        const auto [pk, sk] = pqkem_keypair(KEM_ALG_NAME);
         persisted_eph_pk    = pk;
         persisted_eph_sk    = sk;
         have_persisted_eph  = true;
@@ -117,13 +117,13 @@ inline int attempt_connection(const std::string &server, int port,
       sig_data.insert(sig_data.end(), session_id.begin(), session_id.end());
 
       const auto signature =
-          pqsig_sign("ML-DSA-87",
+          pqsig_sign(SIG_ALG_NAME,
                      std::vector<unsigned char>(my_identity_sk.begin(),
                                                 my_identity_sk.end()),
                      sig_data);
 
       const auto hello_frame = build_hello(
-          my_username, ALGO_KYBER512,
+          my_username, ALGO_KEM_ALG_NAME,
           std::vector<unsigned char>(my_eph_pk.begin(), my_eph_pk.end()),
           ALGO_MLDSA87,
           std::vector<unsigned char>(my_identity_pk.begin(),
@@ -144,3 +144,5 @@ inline int attempt_connection(const std::string &server, int port,
 
       return s;
 }
+
+#endif

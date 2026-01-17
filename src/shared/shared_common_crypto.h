@@ -1,7 +1,8 @@
-#ifndef COMMON_CRYPTO_H
-#define COMMON_CRYPTO_H
+#ifndef SHARED_COMMON_CRYPTO_H
+#define SHARED_COMMON_CRYPTO_H
 
-#include "common_util.h"
+#include "shared_common_util.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -29,6 +30,18 @@ inline constexpr std::size_t NONCE_BYTES = 12;
 inline constexpr std::size_t SHA256_LEN = 32;
 
 inline constexpr std::size_t MIN_FP_PREFIX_HEX = 16;
+
+inline std::string make_symmetric_message_aad(
+    std::string_view sender_fp, std::string_view receiver_fp, uint32_t seq);
+
+struct AADBuilder {
+    std::string local_fp;
+    std::string remote_fp;
+    
+    std::string build_for_seq(uint32_t seq) const {
+        return make_symmetric_message_aad(local_fp, remote_fp, seq);
+    }
+};
 
 inline bool is_valid_hex_token(const std::string &token) noexcept
 {
@@ -824,11 +837,14 @@ compute_fingerprint_array(std::span<const unsigned char> pk)
 }
 
 inline std::string make_symmetric_message_aad(
-    std::string_view fp_a, std::string_view fp_b, uint32_t seq)
+    std::string_view sender_fp, std::string_view receiver_fp, uint32_t seq)
 {
-    std::string a(fp_a);
-    std::string b(fp_b);
-    if (a > b) std::swap(a, b);  // always smaller first
+    // CRITICAL: AAD must match session key derivation order
+    // Session keys are derived with sorted fingerprints (a < b)
+    // So AAD must also use sorted order, NOT sender/receiver order
+    std::string a(sender_fp);
+    std::string b(receiver_fp);
+    if (a > b) std::swap(a, b);
     return a + "|" + b + "|" + std::to_string(seq);
 }
 #endif

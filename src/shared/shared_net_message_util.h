@@ -1,10 +1,13 @@
-#pragma once
+#ifndef SHARED_NET_MESSAGE_UTIL_H
+#define SHARED_NET_MESSAGE_UTIL_H
+
+#include "shared_common_crypto.h"
 
 #include <cstdint>
 #include <string>
 #include <vector>
 #include <mutex>
-#include "common_crypto.h"
+
 
 struct MessageContext
 {
@@ -37,11 +40,16 @@ inline MessageContext prepare_message_context(
     const std::string hexfp = pi.peer_fp_hex;
     ctx.shortfp = hexfp.size() > 10 ? hexfp.substr(0, 10) : hexfp;
 
-    // FIXED: correct type conversion
-    const std::string aad_str = make_symmetric_message_aad(
-        my_fp_hex, pi.peer_fp_hex, ctx.seq);
+
+// AAD must use same sorted order as encryption defined in shared_common_crypto.h struct AADBuilder
+const std::string aad_str = AADBuilder{
+    my_fp_hex,      // me (sender) - local_fp
+    pi.peer_fp_hex  // peer (receiver) - remote_fp
+}.build_for_seq(ctx.seq);
     ctx.aad.assign(aad_str.begin(), aad_str.end());
 
     ctx.valid = true;
     return ctx;
 }
+
+#endif

@@ -28,7 +28,7 @@ configure
 build
 
 echo -e "${BOLD}${BRIGHT_WHITE}Unit test shunit2 (unit/shunit2test.sh)${RESET}"
-./shunit2_run.sh
+./unit.sh
 
 
 echo ""

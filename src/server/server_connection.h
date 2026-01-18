@@ -127,10 +127,10 @@ static void process_client_events(const fd_set& rfds,
         try {
             Parsed p = parse_payload(frame.data() + 4, payload_len);
             switch (p.type) {
-                case MSG_HELLO:
+                case MsgType::MSG_HELLO:
                     handle_hello_message(client, p, frame, sessions, session_by_fd, clients, to_remove);
                     break;
-                case MSG_CHAT:
+                case MsgType::MSG_CHAT:
                     handle_chat_message(client, p, frame, session_by_fd, sessions, clients);
                     break;
                 case MSG_LIST_REQUEST:

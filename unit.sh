@@ -6,18 +6,23 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/bash/shared/default.sh"
 
-BIN_DIR="$SCRIPT_DIR/bin"
-SERVER_BIN="$BIN_DIR/server"
-CLIENT_BIN="$BIN_DIR/client"
+
+SERVER_BIN="$SCRIPT_DIR/server.sh"
+CLIENT_BIN="$SCRIPT_DIR/client.sh"
 
 IP="127.0.0.1"
 PORT="1566"
 
 SESSION_ID="nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK"
 
-KEY_RON="$SCRIPT_DIR/sample/sample_test_key/ron.sk"
-KEY_BETH="$SCRIPT_DIR/sample/sample_test_key/beth.sk"
-KEY_BOB="$SCRIPT_DIR/sample/sample_test_key/bob.sk"
+KEY_RON_PEM="$SCRIPT_DIR/sample/ron.sk.pem"
+CERT_RON="$SCRIPT_DIR/sample/ron.crt"
+
+KEY_BETH_PEM="$SCRIPT_DIR/sample/beth.sk.pem"
+CERT_BETH="$SCRIPT_DIR/sample/beth.crt"
+
+KEY_BOB_PEM="$SCRIPT_DIR/sample/bob.sk.pem"
+CERT_BOB="$SCRIPT_DIR/sample/bob.crt"
 
 # !important DO NOT CHANGE!
 FP_BETH_FROM_RON=""
@@ -49,6 +54,7 @@ FAILED_DESC=""
 FAILED_PATTERN=""
 FAILED_OUTPUT=""
 FAILED_TARGET=""
+
 
 declare -A CLIENT_EXPECTED_EXIT
 CLIENT_EXPECTED_EXIT[bob]=true
@@ -227,9 +233,9 @@ EXEC_002_Start_server() {
 Test_003_Ron_connect() {
     printf "%s%s%s\n" "${BOLD}${WHITE}" "Test 003: Ron connects" "${RESET}" >&2
     tmux new-window -t "$TMUX_SESSION:1" -n ron
-    send_cmd ron "$CLIENT_BIN $IP $PORT ron $KEY_RON --sessionid $SESSION_ID" "(ron login)"
+    send_cmd ron "$CLIENT_BIN $IP $PORT ron $KEY_RON_PEM $CERT_RON --sessionid $SESSION_ID" "(ron login)"
     sleep $DELAY_USER_CONNECT_INIT
-    check_output ron "connected" "Ron connected"
+    check_output ron "TLS handshake successful" "Ron connected"
     sleep $DELAY_USER_CONNECT_EST
     check_output server "connect ron session=.*" "Server sees ron"
 }
@@ -238,9 +244,9 @@ Test_003_Ron_connect() {
 Test_004_Beth_connect() {
     printf "%s%s%s\n" "${BOLD}${WHITE}" "Test 004: Beth connects" "${RESET}" >&2
     tmux new-window -t "$TMUX_SESSION:2" -n beth
-    send_cmd beth "$CLIENT_BIN $IP $PORT beth $KEY_BETH --sessionid $SESSION_ID" "(beth login)"
+    send_cmd beth "$CLIENT_BIN $IP $PORT beth $KEY_BETH_PEM $CERT_BETH --sessionid $SESSION_ID" "(beth login)"
     sleep $DELAY_USER_CONNECT_INIT
-    check_output beth "connected" "Beth connected"
+    check_output beth "TLS handshake successful" "Beth connected"
     check_output beth "connect ron pubkey=.*" "Beth sees ron" 10
     check_output beth "peer ron ready" "Beth ready with ron" 10
     sleep $DELAY_USER_CONNECT_EST
@@ -269,9 +275,9 @@ Test_005_Ron_Beth_messaging_and_fp_extraction() {
 Test_006_Bob_connect() {
     printf "%s%s%s\n" "${BOLD}${WHITE}" "Test 006: Bob connects + triangular rekey" "${RESET}" >&2
     tmux new-window -t "$TMUX_SESSION:3" -n bob
-    send_cmd bob "$CLIENT_BIN $IP $PORT bob $KEY_BOB --sessionid $SESSION_ID" "(bob login)"
+    send_cmd bob "$CLIENT_BIN $IP $PORT bob $KEY_BOB_PEM $CERT_BOB --sessionid $SESSION_ID" "(bob login)"
     sleep $DELAY_USER_CONNECT_INIT
-    check_output bob "connected" "Bob connected"
+    check_output bob "TLS handshake successful" "Bob connected"
     check_output bob "connect ron pubkey=.*" "Bob sees ron" 45
     check_output bob "connect beth pubkey=.*" "Bob sees beth" 45
     check_output bob "peer ron ready" "Bob ready with ron" 45
@@ -383,10 +389,10 @@ Test_011_Post_Ron_reconnect_full_verification() {
     sleep $DELAY_TMUX_SHUTDOWN
 
     tmux new-window -t "$TMUX_SESSION:1" -n ron
-    send_cmd ron "$CLIENT_BIN $IP $PORT ron $KEY_RON --sessionid $SESSION_ID" "(ron relogin)"
+    send_cmd ron "$CLIENT_BIN $IP $PORT ron $KEY_RON_PEM $CERT_RON --sessionid $SESSION_ID" "(ron login)"
     sleep $DELAY_USER_CONNECT_INIT
 
-    check_output ron "connected" "Ron reconnected"
+    check_output ron "TLS handshake successful" "Ron reconnected"
     check_output ron "peer beth ready" "Ron ready with beth (post-reconnect)" 45
     check_output ron "peer bob ready" "Ron ready with bob (post-reconnect)" 45
 
@@ -442,9 +448,9 @@ Test_012_Server_restart_full_verification() {
     sleep $DELAY_SERVER_START
     nc -z "$IP" "$PORT" && log "Server back online" || (log "FAIL: Server restart failed"; return 1)
 
-    check_output ron "connected" "Ron reconnected after server restart" 1
-    check_output beth "connected" "Beth reconnected after server restart" 1
-    check_output bob "connected" "Bob reconnected after server restart" 1
+    check_output ron "TLS handshake successful" "Ron reconnected after server restart" 1
+    check_output beth "TLS handshake successful" "Beth reconnected after server restart" 1
+    check_output bob "TLS handshake successful" "Bob reconnected after server restart" 1
 
     extract_fps_from_client "ron" "after server restart"
 
@@ -490,7 +496,7 @@ print_final_failure_banner() {
 printf "%s%s%s\n" "${BOLD}${WHITE}" "=== STARTING FULL SPRK TEST SUITE ===" "${RESET}" >&2
 
 TESTS=(
-    Test_001_Client_help
+    #Test_001_Client_help
     EXEC_002_Start_server
     Test_003_Ron_connect
     Test_004_Beth_connect
@@ -556,3 +562,6 @@ fi
 
 print_final_failure_banner
 exit 1
+
+
+

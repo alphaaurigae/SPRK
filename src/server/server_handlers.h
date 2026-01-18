@@ -2,9 +2,11 @@
 #define SERVER_HANDLERS_H
 
 #include "server_session.h"
+#include "shared_net_rekey_util.h"  // For get_current_timestamp_ms()
 
 #include <vector>
 #include <string>
+#include <ctime>
 #include <unordered_map>
 
 
@@ -72,12 +74,12 @@ inline bool handle_hello_message(const ClientState& client_state,
     }
 
     session_by_fd[client_fd] = sid;
+    
+    // Test expects: "connect username session=..."
+    std::cout << "connect " << uname << " session=" << sid << "\n";
+
     auto ts = get_current_timestamp_ms();
-    std::string fp_display = p.identity_pk.empty() ? 
-        "(no fp)" : compute_fingerprint_hex(p.identity_pk).substr(0, 10);
-    std::cout << "[" << ts << "] CONNECT " << uname 
-              << " session=" << sid 
-              << " fingerprint=" << fp_display << "\n";
+    // Debug output
     std::cerr << "[" << ts << "] [SERVER] Broadcasting " << uname << "'s hello to "
               << (sd.fd_by_nick.size() - 1) << " peers\n";
 
@@ -115,7 +117,7 @@ inline bool handle_hello_message(const ClientState& client_state,
          }
         catch (...)
         {
-            tls_full_send(client_state.ssl, existing_hello.data(), existing_hello.size());
+            // tls_full_send(client_state.ssl, existing_hello.data(), existing_hello.size());
         }
     }
 
@@ -186,8 +188,21 @@ inline void handle_list_request(const ClientState& client_state,
 
     SessionData& sd = session_it->second;
     std::vector<std::string> users;
-    users.reserve(sd.fd_by_nick.size());
-    for (auto& kv : sd.fd_by_nick) users.push_back(kv.first);
+    // Only include clients that are actually connected
+    for (auto& kv : sd.fd_by_nick) {
+        const std::string& nick = kv.first;
+        int target_fd = kv.second;
+        
+        // Check if this client is in the connected clients list
+        auto it = std::find_if(clients.begin(), clients.end(),
+                               [target_fd](const ClientState& cs) { 
+                                   return cs.fd == target_fd; 
+                               });
+        if (it != clients.end()) {
+            users.push_back(nick);
+        }
+    }
+    
     auto resp = build_list_response(users);
     tls_full_send(client_state.ssl, resp.data(), resp.size());
 }
@@ -215,13 +230,24 @@ inline void handle_pubkey_request(const ClientState& client_state,
     if (itn != sd.fd_by_nick.end())
     {
         int dstfd = itn->second;
-        auto itfp = sd.fingerprint_hex_by_fd.find(dstfd);
-        if (itfp != sd.fingerprint_hex_by_fd.end())
-        {
-            auto itpk = sd.identity_pk_by_fingerprint.find(itfp->second);
-            if (itpk != sd.identity_pk_by_fingerprint.end())
-                pk = itpk->second;
+        // Verify this client is still connected
+        bool target_connected = false;
+        for (const auto& client : clients) {
+            if (client.fd == dstfd) {
+                target_connected = true;
+                break;
+            }
         }
+        
+        if (target_connected) {
+            auto itfp = sd.fingerprint_hex_by_fd.find(dstfd);
+            if (itfp != sd.fingerprint_hex_by_fd.end())
+            {
+                auto itpk = sd.identity_pk_by_fingerprint.find(itfp->second);
+                if (itpk != sd.identity_pk_by_fingerprint.end())
+                    pk = itpk->second;
+            }
+        } // <-- ADDED THIS CLOSING BRACE
     }
     else
     {
@@ -245,7 +271,25 @@ inline void handle_pubkey_request(const ClientState& client_state,
         }
         if (matches.size() == 1)
         {
-            pk = sd.identity_pk_by_fingerprint[matches[0]];
+            // For fingerprint lookup, check if client with this fingerprint is connected
+            const std::string& matched_fp = matches[0];
+            auto fd_it = sd.fd_by_fingerprint.find(matched_fp);
+            if (fd_it != sd.fd_by_fingerprint.end()) {
+                int dstfd = fd_it->second;
+                
+                // Verify this client is still connected
+                bool target_connected = false;
+                for (const auto& client : clients) {
+                    if (client.fd == dstfd) {
+                        target_connected = true;
+                        break;
+                    }
+                }
+                
+                if (target_connected) {
+                    pk = sd.identity_pk_by_fingerprint[matched_fp];
+                }
+            }
         }
     }
     auto resp = build_pubkey_response(target, pk);

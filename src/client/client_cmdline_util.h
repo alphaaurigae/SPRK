@@ -3,11 +3,10 @@
 
 #include "shared_common_util.h"
 
-#include <string>
-#include <span>
-#include <iostream>
 #include <cstdlib>
-
+#include <iostream>
+#include <span>
+#include <string>
 
 // --- 1. Command line parsing ---
 struct ConnectionConfig
@@ -18,8 +17,6 @@ struct ConnectionConfig
     std::string client_cert_path;
     std::string client_key_path;
 };
-
-
 
 inline ConnectionConfig parse_command_line_args(std::span<char *> args)
 {

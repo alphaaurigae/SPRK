@@ -1,39 +1,48 @@
 #!/bin/bash
 
-
-BOLD='\033[1m'
-BRIGHT_WHITE='\033[1;37m'
-RESET='\033[0m' 
+. bash/shared/default.sh # source bash colors / defaults.
 
 BUILD_DIR="build"
 BIN_DIR='bin'
-BIN_NAME='universe'
-
+BIN1_NAME='server / server.sh'
+BIN2_NAME='client / client.sh'
 
 configure() {
-    echo -e "${BOLD}${BRIGHT_WHITE}Create build directories and config cmake${RESET}"
-    mkdir -p ${BUILD_DIR}
-    cmake -S . -B ${BUILD_DIR} -DCMAKE_VERBOSE_MAKEFILE=ON
+	print_status "Create build directories and config cmake"
+	mkdir -p ${BUILD_DIR}
+	cmake -S . -B ${BUILD_DIR} --fresh -DCMAKE_VERBOSE_MAKEFILE=ON
 }
 
 build() {
-    echo -e "${BOLD}${BRIGHT_WHITE}Building project...${RESET}"
-    cmake --build ${BUILD_DIR} --target all -- -j$(nproc) --debug
+	print_status "Building project..."
+	cmake --build ${BUILD_DIR} --clean-first --target all -- -j$(nproc) --debug
 }
 
+print_info() {
+	print_status "INFO:"
+	printf '\n'
+	print_status "${BIN_DIR}/${BIN1_NAME} bin/server \"1566\" or ./server.sh"
+	print_status "${BIN_DIR}/${BIN2_NAME} bin/client or ./server.sh 127.0.0.1 1566 ron sample/ron.sk.pem sample/ron.crt --sessionid bY5aaFZFaTXxktTSStJW99cQb73KZeRtrMnbvB7gprzecTcatZwqMmYu2tWz"
+	printf '\n'
+	print_status "Run CLANG-FORMAT & CLANG-TIDY on src/ with ./clang-format_clang-tidy_from_srctosrc.sh from reporoot"
+	#./clang-format_clang-tidy_from_srctosrc.sh
+	printf '\n'
+	print_status "Run a simple unittest for server & client with ./unit.sh from reporoot"
+	# echo -e "${BOLD}${BRIGHT_WHITE}Unit test shunit2 (unit/shunit2test.sh)${RESET}"
+	# ./unit.sh
+	printf '\n'
+	print_status "Generate certificates by executing ./generate_pq_certs.sh from reporoot"
+	print_status "Generate keys by executing ./keygen_run.sh from reporoot"
+	printf '\n'
+}
 
-./clean_cmake.sh
+main() {
+	check_workdir # verify the workdir by bash/shared/default.sh check_workdir as defined by WORKDIR_NAME=
 
-configure
-build
+	./clean_cmake.sh
 
-echo -e "${BOLD}${BRIGHT_WHITE}Unit test shunit2 (unit/shunit2test.sh)${RESET}"
-./unit.sh
+	configure
+	build
+}
 
-
-echo ""
-echo -e "${BOLD}${BRIGHT_WHITE}See unit test results and check build success ... bin should be in $BIN_DIR e.g ${BIN_DIR}/${BIN_NAME}${RESET}"
-echo ""
-echo -e "${BOLD}${BRIGHT_WHITE}E.g:${RESET}"
-echo ""
-echo -e "${BOLD}${BRIGHT_WHITE}${BIN_DIR}/${BIN_NAME} -s --main_delimiter_none --block_delimiter_semicolon -ia \"Hello Binary\"${RESET}"
+main

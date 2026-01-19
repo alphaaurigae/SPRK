@@ -3,16 +3,15 @@
 
 #include "client_runtime.h"
 #include "shared_common_crypto.h"
-#include "shared_net_common_protocol.h"
 #include "shared_common_util.h"
+#include "shared_net_common_protocol.h"
 #include "shared_net_key_util.h"
 
-
+#include <atomic>
+#include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <mutex>
-#include <atomic>
-#include <string>
 #include <vector>
 
 struct PeerInfo
@@ -34,34 +33,31 @@ struct PeerInfo
     bool          identity_verified       = false;
 };
 
-
-static constexpr uint32_t REKEY_INTERVAL         = 1024;
-static constexpr size_t   MAX_PEERS              = 256;
-static constexpr uint32_t RATE_LIMIT_MSGS        = 100;
-static constexpr uint64_t RATE_LIMIT_WINDOW_MS   = 1000;
+static constexpr uint32_t REKEY_INTERVAL       = 1024;
+static constexpr size_t   MAX_PEERS            = 256;
+static constexpr uint32_t RATE_LIMIT_MSGS      = 100;
+static constexpr uint64_t RATE_LIMIT_WINDOW_MS = 1000;
 
 inline std::unordered_map<std::string, PeerInfo> peers;
-inline std::unordered_map<std::string, std::unordered_set<std::string>> fps_by_username;
-inline std::mutex       peers_mtx;
-inline std::string      my_username;
-inline std::string      session_id;
-inline secure_vector    my_eph_pk;
-inline secure_vector    my_eph_sk;
-
+inline std::unordered_map<std::string, std::unordered_set<std::string>>
+                     fps_by_username;
+inline std::mutex    peers_mtx;
+inline std::string   my_username;
+inline std::string   session_id;
+inline secure_vector my_eph_pk;
+inline secure_vector my_eph_sk;
 
 inline secure_vector my_identity_pk;
 inline secure_vector my_identity_sk;
-inline std::string my_fp_hex;
-
-
-
+inline std::string   my_fp_hex;
 
 static bool check_rate_limit(PeerInfo &pi) noexcept
 {
     RateLimitState state{pi.rate_limit_counter, pi.rate_limit_window_start};
-    const bool allowed = check_rate_limit(state, get_current_timestamp_ms(), 
-                                          RATE_LIMIT_MSGS, RATE_LIMIT_WINDOW_MS);
-    pi.rate_limit_counter = state.counter;
+    const bool     allowed =
+        check_rate_limit(state, get_current_timestamp_ms(), RATE_LIMIT_MSGS,
+                         RATE_LIMIT_WINDOW_MS);
+    pi.rate_limit_counter      = state.counter;
     pi.rate_limit_window_start = state.window_start_ms;
     return allowed;
 }

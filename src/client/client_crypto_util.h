@@ -1,18 +1,18 @@
 #ifndef CLIENT_CRYPTO_UTIL_H
 #define CLIENT_CRYPTO_UTIL_H
 
+#include "client_peer_manager.h"
 #include "client_runtime.h"
 #include "shared_common_crypto.h"
-#include "shared_net_common_protocol.h"
 #include "shared_common_util.h"
-#include "shared_net_tls_context.h"
+#include "shared_net_common_protocol.h"
+#include "shared_net_key_util.h"
+#include "shared_net_message_util.h"
+#include "shared_net_rekey_util.h"
 #include "shared_net_socket_util.h"
+#include "shared_net_tls_context.h"
 #include "shared_net_tls_frame_io.h"
 #include "shared_net_username_util.h"
-#include "shared_net_rekey_util.h"
-#include "shared_net_message_util.h"
-#include "shared_net_key_util.h"
-#include "client_peer_manager.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -27,6 +28,9 @@
 #include <iostream>
 #include <mutex>
 #include <netinet/in.h>
+#include <openssl/err.h>
+#include <openssl/provider.h>
+#include <openssl/ssl.h>
 #include <span>
 #include <sstream>
 #include <string>
@@ -37,12 +41,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/provider.h> 
-#include <csignal>
-
-
 
 inline bool init_oqs_provider()
 
@@ -61,15 +59,23 @@ inline bool init_oqs_provider()
     return true;
 }
 
-struct KeyPath { std::string value; };
-struct AlgorithmName { std::string value; };
-static void rotate_ephemeral_if_needed([[maybe_unused]] int sock, const std::string &peer_fp)
+struct KeyPath
+{
+    std::string value;
+};
+struct AlgorithmName
+{
+    std::string value;
+};
+static void rotate_ephemeral_if_needed([[maybe_unused]] int sock,
+                                       const std::string   &peer_fp)
 {
     bool do_rotate = false;
     {
         const std::lock_guard<std::mutex> lk(peers_mtx);
-        const auto it = peers.find(peer_fp);
-        if (it != peers.end() && should_rekey(it->second.send_seq, REKEY_INTERVAL))
+        const auto                        it = peers.find(peer_fp);
+        if (it != peers.end() &&
+            should_rekey(it->second.send_seq, REKEY_INTERVAL))
         {
             do_rotate = true;
         }
@@ -80,10 +86,10 @@ static void rotate_ephemeral_if_needed([[maybe_unused]] int sock, const std::str
     // ---- REMOVE THE rtm LINE COMPLETELY ----
     // We keep the timer code in main.cpp only, so no "rtm" here
 
-    const auto ms = get_current_timestamp_ms();
-    auto eph_pair = pqkem_keypair(KEM_ALG_NAME);
-    secure_vector new_pk = eph_pair.first;
-    secure_vector new_sk = eph_pair.second;
+    const auto                 ms       = get_current_timestamp_ms();
+    auto                       eph_pair = pqkem_keypair(KEM_ALG_NAME);
+    secure_vector              new_pk   = eph_pair.first;
+    secure_vector              new_sk   = eph_pair.second;
     std::vector<unsigned char> sig_data;
     sig_data.reserve(new_pk.size() + session_id.size());
     sig_data.insert(sig_data.end(), new_pk.begin(), new_pk.end());
@@ -96,28 +102,29 @@ static void rotate_ephemeral_if_needed([[maybe_unused]] int sock, const std::str
     const std::vector<unsigned char> identity_pk_vec(my_identity_pk.begin(),
                                                      my_identity_pk.end());
     const std::vector<unsigned char> empty_encaps;
-    const auto hello_frame = build_hello(
+    const auto                       hello_frame = build_hello(
         my_username, ALGO_KEM_ALG_NAME,
         std::vector<unsigned char>(new_pk.begin(), new_pk.end()), ALGO_MLDSA87,
         identity_pk_vec, signature_vec, empty_encaps, session_id);
     tls_full_send(ssl, hello_frame.data(), hello_frame.size());
     {
         const std::lock_guard<std::mutex> lk(peers_mtx);
-        my_eph_pk = new_pk;
-        my_eph_sk = new_sk;
+        my_eph_pk     = new_pk;
+        my_eph_sk     = new_sk;
         const auto it = peers.find(peer_fp);
         if (it != peers.end())
         {
-            auto &pi = it->second;
+            auto &pi    = it->second;
             pi.send_seq = 0;
-            pi.ready = false;
+            pi.ready    = false;
         }
     }
     dev_println("[" + std::to_string(ms) +
                 "] rotated ephemeral key for peer_fp " + peer_fp);
 }
 
-static bool check_hello_signature(const Parsed &p, const std::string &peer_name, int64_t ms)
+static bool check_hello_signature(const Parsed &p, const std::string &peer_name,
+                                  int64_t ms)
 {
     std::vector<unsigned char> sig_data;
     sig_data.reserve(p.eph_pk.size() + p.session_id.size());
@@ -134,18 +141,22 @@ static bool check_hello_signature(const Parsed &p, const std::string &peer_name,
     return sig_ok;
 }
 
-
 // AAD Context Construction
-static std::string build_key_context_for_peer(const std::string &my_fp, const std::string &peer_fp_hex_ref, const std::string &session_id_val)
+static std::string
+build_key_context_for_peer(const std::string &my_fp,
+                           const std::string &peer_fp_hex_ref,
+                           const std::string &session_id_val)
 {
-    if (my_fp.empty() || peer_fp_hex_ref.empty() || session_id_val.empty()) {
+    if (my_fp.empty() || peer_fp_hex_ref.empty() || session_id_val.empty())
+    {
         throw std::runtime_error("invalid key context parameters");
     }
-    
-        std::string a = my_fp;
-         std::string b = peer_fp_hex_ref;
-         if (a > b) std::swap(a, b);
-         return a + "|" + b + "|" + session_id_val;
+
+    std::string a = my_fp;
+    std::string b = peer_fp_hex_ref;
+    if (a > b)
+        std::swap(a, b);
+    return a + "|" + b + "|" + session_id_val;
 }
 
 static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
@@ -159,7 +170,7 @@ static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
             pqkem_decaps(KEM_ALG_NAME, p.encaps, my_eph_sk);
         pi.sk = derive_shared_key_from_secret(shared, key_context);
         std::cerr << "[KEY] Derived for " << peer_name
-                  << " key=" << to_hex(pi.sk.key).substr(0,32)
+                  << " key=" << to_hex(pi.sk.key).substr(0, 32)
                   << " context=" << key_context << " (encaps)\n";
         dev_println("[" + std::to_string(ms) +
                     "] DEBUG decaps: my=" + my_username + " peer=" + peer_name +
@@ -178,18 +189,25 @@ static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
     }
 }
 
-static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p, const std::string &key_context, [[maybe_unused]] int sock, const std::string &peer_name, int64_t ms) {
-    try {
+static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
+                                        const std::string   &key_context,
+                                        [[maybe_unused]] int sock,
+                                        const std::string   &peer_name,
+                                        int64_t              ms)
+{
+    try
+    {
         // Recompute locally (safe and simple – no need to pass extra param)
-        std::string peer_fp_hex = fingerprint_to_hex(
-            fingerprint_sha256(std::vector<unsigned char>(
+        std::string peer_fp_hex =
+            fingerprint_to_hex(fingerprint_sha256(std::vector<unsigned char>(
                 pi.identity_pk.begin(), pi.identity_pk.end())));
 
         bool initiator = my_fp_hex < peer_fp_hex;
 
-        dev_println(">>> INITIATOR SENDING ENCAPS! my=" + my_username + " peer=" + peer_name 
-                    + " initiator=" + std::to_string(initiator) 
-                    + " already_sent=" + std::to_string(pi.sent_hello));
+        dev_println(">>> INITIATOR SENDING ENCAPS! my=" + my_username +
+                    " peer=" + peer_name +
+                    " initiator=" + std::to_string(initiator) +
+                    " already_sent=" + std::to_string(pi.sent_hello));
 
         // Fixed: proper function call syntax (no stray ... and no extra comma)
         const auto enc_pair = pqkem_encaps(
@@ -197,11 +215,11 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p, const std
             std::vector<unsigned char>(pi.eph_pk.begin(), pi.eph_pk.end()));
 
         const std::vector<unsigned char> encaps_ct = enc_pair.first;
-        const secure_vector shared = enc_pair.second;
+        const secure_vector              shared    = enc_pair.second;
 
         pi.sk = derive_shared_key_from_secret(shared, key_context);
         std::cerr << "[KEY] Derived for " << peer_name
-                  << " key=" << to_hex(pi.sk.key).substr(0,32)
+                  << " key=" << to_hex(pi.sk.key).substr(0, 32)
                   << " context=" << key_context << " (encaps)\n";
 
         dev_println("[" + std::to_string(ms) +
@@ -247,7 +265,6 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p, const std
     }
 }
 
-
 bool validate_username(const std::string &peer_name, uint64_t ms)
 {
     if (!is_valid_username(peer_name))
@@ -263,8 +280,10 @@ bool validate_username(const std::string &peer_name, uint64_t ms)
         return false;
     }
     // Prevent Self-Session Exploits
-    if (peer_name == my_username) {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: self-messaging blocked");
+    if (peer_name == my_username)
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] REJECTED: self-messaging blocked");
         return false;
     }
     return true;
@@ -282,7 +301,8 @@ bool check_peer_limits(const std::string &peer_key, uint64_t ms)
     return true;
 }
 
-bool check_rate_and_signature(PeerInfo &pi, const Parsed &p, const std::string &peer_name, uint64_t ms)
+bool check_rate_and_signature(PeerInfo &pi, const Parsed &p,
+                              const std::string &peer_name, uint64_t ms)
 {
     if (!check_rate_limit(pi))
     {
@@ -322,7 +342,8 @@ bool get_expected_lengths(ExpectedLengths &lengths, uint64_t ms)
     return true;
 }
 
-bool validate_eph_pk_length(const Parsed &p, size_t expected_pk_len, const std::string &peer_name, uint64_t ms)
+bool validate_eph_pk_length(const Parsed &p, size_t expected_pk_len,
+                            const std::string &peer_name, uint64_t ms)
 {
     if (p.eph_pk.size() != expected_pk_len)
     {
@@ -332,7 +353,6 @@ bool validate_eph_pk_length(const Parsed &p, size_t expected_pk_len, const std::
     }
     return true;
 }
-
 
 bool handle_encaps_present(PeerInfo &pi, const Parsed &p,
                            size_t             expected_ct_len,
@@ -364,7 +384,6 @@ bool handle_initiator_no_encaps(PeerInfo &pi, const Parsed &p,
     return try_handle_initiator_encaps(pi, p, key_context, sock, peer_name,
                                        static_cast<int64_t>(ms));
 }
-
 
 void log_awaiting_encaps(const std::string &peer_name, uint64_t ms)
 {

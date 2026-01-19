@@ -6,7 +6,8 @@
 #include <mutex>
 #include <string>
 
-inline void handle_disconnect(const std::string &username, const std::string &fp_hex)
+inline void handle_disconnect(const std::string &username,
+                              const std::string &fp_hex)
 {
     const std::lock_guard<std::mutex> lk(peers_mtx);
 

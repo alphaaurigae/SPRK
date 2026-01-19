@@ -1,7 +1,8 @@
 # Build directory
 build/
 bin/
-clang_tidy_output/
+src_old*
+.cache/
 
 # CMake files
 CMakeFiles/

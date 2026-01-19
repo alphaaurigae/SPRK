@@ -4,10 +4,9 @@
 #include "shared_common_crypto.h"
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
-#include <mutex>
-
 
 struct MessageContext
 {
@@ -20,32 +19,33 @@ struct MessageContext
 };
 
 template <typename PeerMap>
-inline MessageContext prepare_message_context(
-    const std::string &recipient_fp,
-    const std::string &my_fp_hex,
-    PeerMap &peers,
-    std::mutex &peers_mtx)
+inline MessageContext prepare_message_context(const std::string &recipient_fp,
+                                              const std::string &my_fp_hex,
+                                              PeerMap           &peers,
+                                              std::mutex        &peers_mtx)
 {
-    MessageContext ctx;
+    MessageContext                    ctx;
     const std::lock_guard<std::mutex> lk(peers_mtx);
-    const auto it = peers.find(recipient_fp);
+    const auto                        it = peers.find(recipient_fp);
     if (it == peers.end())
         return ctx;
     auto &pi = it->second;
     if (!pi.ready)
         return ctx;
-    ctx.seq = pi.send_seq;
-    ctx.session_key = pi.sk.key;
-    ctx.target_username = pi.username;
+    ctx.seq                 = pi.send_seq;
+    ctx.session_key         = pi.sk.key;
+    ctx.target_username     = pi.username;
     const std::string hexfp = pi.peer_fp_hex;
-    ctx.shortfp = hexfp.size() > 10 ? hexfp.substr(0, 10) : hexfp;
+    ctx.shortfp             = hexfp.size() > 10 ? hexfp.substr(0, 10) : hexfp;
 
-
-// AAD must use same sorted order as encryption defined in shared_common_crypto.h struct AADBuilder
-const std::string aad_str = AADBuilder{
-    my_fp_hex,      // me (sender) - local_fp
-    pi.peer_fp_hex  // peer (receiver) - remote_fp
-}.build_for_seq(ctx.seq);
+    // AAD must use same sorted order as encryption defined in
+    // shared_common_crypto.h struct AADBuilder
+    const std::string aad_str =
+        AADBuilder{
+            my_fp_hex,     // me (sender) - local_fp
+            pi.peer_fp_hex // peer (receiver) - remote_fp
+        }
+            .build_for_seq(ctx.seq);
     ctx.aad.assign(aad_str.begin(), aad_str.end());
 
     ctx.valid = true;

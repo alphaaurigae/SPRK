@@ -1,21 +1,19 @@
 #ifndef CLIENT_COMMANDS_H
 #define CLIENT_COMMANDS_H
 
+#include "client_peer_disconnect.h"
+#include "client_peer_manager.h"
 #include "client_runtime.h"
 #include "shared_common_util.h"
-#include "client_peer_manager.h"
 #include "shared_net_message_util.h"
 #include "shared_net_tls_frame_io.h"
-#include "client_peer_disconnect.h"
 
-#include <string>
-#include <vector>
-#include <iostream>
 #include <algorithm>
+#include <iostream>
 #include <mutex>
 #include <openssl/ssl.h>
-
-
+#include <string>
+#include <vector>
 
 // Strong type to prevent swapping msg and recipient_fp
 struct RecipientFP
@@ -50,7 +48,7 @@ inline std::vector<std::string> parse_recipient_list(const std::string &input)
 }
 
 // Returns true if the line was a command that was fully handled
-inline bool handle_client_command(const std::string &line, 
+inline bool handle_client_command(const std::string   &line,
                                   [[maybe_unused]] int sock, SSL *ssl)
 {
     if (line == "help")
@@ -78,7 +76,8 @@ inline bool handle_client_command(const std::string &line,
             if (tls_full_send(ssl, f.data(), f.size()) <= 0)
             {
                 is_connected = false;
-                handle_disconnect("", ""); // list request fails, we may not know peer yet
+                handle_disconnect(
+                    "", ""); // list request fails, we may not know peer yet
             }
         }
         {
@@ -100,7 +99,8 @@ inline bool handle_client_command(const std::string &line,
             if (tls_full_send(ssl, req.data(), req.size()) <= 0)
             {
                 is_connected = false;
-                handle_disconnect(who, ""); // pubk request fails, clean any partial state
+                handle_disconnect(
+                    who, ""); // pubk request fails, clean any partial state
             }
         }
         return true;

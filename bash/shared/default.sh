@@ -4,6 +4,9 @@ IFS=$'\n\t'
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+WORKDIR_NAME="SPRK" # Verify repository root (check_workdir in bash/shared/default.sh), make sure we only run in WORKLDIR_NAME.
+TIMESTAMP=$(date +%Y%m%d_%H%M%S) # timestamp.
+
 ################################
 # COLOR
 BOLD=$(tput bold)
@@ -27,3 +30,17 @@ BRIGHT_BLUE=$(tput setaf 12)
 BRIGHT_MAGENTA=$(tput setaf 13)
 BRIGHT_CYAN=$(tput setaf 14)
 BRIGHT_WHITE=$(tput setaf 15)
+
+print_status()   { printf "%s%s%s\n" "$BOLD$WHITE" "$1" "$RESET"; }
+print_success()  { printf "%s%s%s\n" "$BOLD$GREEN" "$1" "$RESET"; }
+print_error()    { printf "%s%s%s\n" "$BOLD$RED" "$1" "$RESET"; }
+print_warning()  { printf "%s%s%s\n" "$BOLD$MAGENTA" "$1" "$RESET"; }
+print_highlight(){ printf "%s%s%s\n" "$BOLD$CYAN" "$1" "$RESET"; }
+
+# Verify repository root, make sure we only run in WORKDIR_NAME.
+check_workdir() {
+	if [[ "${PWD##*/}" != "$WORKDIR_NAME" ]]; then
+		print_error "Error: script must be run from repository root directory named $WORKDIR_NAME"
+		exit 1
+	fi
+}

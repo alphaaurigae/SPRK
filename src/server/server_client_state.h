@@ -1,84 +1,99 @@
 #ifndef SERVER_CLIENT_STATE_H
 #define SERVER_CLIENT_STATE_H
 
-#include <vector>
 #include <algorithm>
-#include <unistd.h>
-#include <openssl/ssl.h>
 #include <memory>
+#include <openssl/ssl.h>
+#include <unistd.h>
+#include <vector>
 
 struct AsioSSLContextWrapper;
 
-struct ClientState {
-    int fd = -1;
-    SSL* ssl = nullptr;
+struct ClientState
+{
+    int  fd       = -1;
+    SSL *ssl      = nullptr;
     ClientState() = default;
-    ClientState(int f, SSL* s) : fd(f), ssl(s) {}
-    
-    ClientState(const ClientState&) = delete;
-    ClientState& operator=(const ClientState&) = delete;
-    
-    ClientState(ClientState&& other) noexcept : fd(other.fd), ssl(other.ssl) {
-        other.fd = -1;
+    ClientState(int f, SSL *s) : fd(f), ssl(s) {}
+
+    ClientState(const ClientState &)            = delete;
+    ClientState &operator=(const ClientState &) = delete;
+
+    ClientState(ClientState &&other) noexcept : fd(other.fd), ssl(other.ssl)
+    {
+        other.fd  = -1;
         other.ssl = nullptr;
     }
-    
-    ClientState& operator=(ClientState&& other) noexcept {
-        if (this != &other) {
+
+    ClientState &operator=(ClientState &&other) noexcept
+    {
+        if (this != &other)
+        {
             cleanup();
-            fd = other.fd;
-            ssl = other.ssl;
-            other.fd = -1;
+            fd        = other.fd;
+            ssl       = other.ssl;
+            other.fd  = -1;
             other.ssl = nullptr;
         }
         return *this;
     }
-    ~ClientState() {
-        cleanup();
-    }
-private:
-    void cleanup() noexcept {
-        if (ssl) {
+    ~ClientState() { cleanup(); }
+
+  private:
+    void cleanup() noexcept
+    {
+        if (ssl)
+        {
             SSL_shutdown(ssl);
             SSL_free(ssl);
             ssl = nullptr;
         }
-        if (fd >= 0) {
+        if (fd >= 0)
+        {
             close(fd);
             fd = -1;
         }
     }
 };
 
-inline bool accept_new_client(int listen_fd, std::vector<ClientState>& clients, const std::shared_ptr<AsioSSLContextWrapper>& ctx) {
+inline bool accept_new_client(int listen_fd, std::vector<ClientState> &clients,
+                              const std::shared_ptr<AsioSSLContextWrapper> &ctx)
+{
     int c = accept(listen_fd, nullptr, nullptr);
-    if (c < 0) return false;
-    if (c >= FD_SETSIZE) {
+    if (c < 0)
+        return false;
+    if (c >= FD_SETSIZE)
+    {
         close(c);
         return true;
     }
-    
-    if (set_socket_nonblocking(c) != 0) {
+
+    if (set_socket_nonblocking(c) != 0)
+    {
         close(c);
         return true;
     }
-    
-    SSL* ssl = SSL_new(ctx->native_handle());
-    if (!ssl) {
+
+    SSL *ssl = SSL_new(ctx->native_handle());
+    if (!ssl)
+    {
         close(c);
         return true;
     }
     SSL_set_fd(ssl, c);
     SSL_set_accept_state(ssl);
-    
+
     clients.push_back({c, ssl});
     return true;
 }
 
-static void prune_invalid_clients(std::vector<ClientState>& clients) {
+static void prune_invalid_clients(std::vector<ClientState> &clients)
+{
     clients.erase(std::remove_if(clients.begin(), clients.end(),
-                                 [](const ClientState& cs) {
-                                     if (cs.fd >= FD_SETSIZE) {
+                                 [](const ClientState &cs)
+                                 {
+                                     if (cs.fd >= FD_SETSIZE)
+                                     {
                                          return true;
                                      }
                                      return false;

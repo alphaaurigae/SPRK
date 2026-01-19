@@ -4,20 +4,23 @@
 #include "shared_net_common_protocol.h"
 
 #include <string>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
-struct SessionData {
-    std::unordered_map<int, std::string> nick_by_fd;
-    std::unordered_map<std::string, int> fd_by_nick;
-    std::unordered_map<int, std::string> fingerprint_hex_by_fd;
-    std::unordered_map<std::string, int> fd_by_fingerprint;
+struct SessionData
+{
+    std::unordered_map<int, std::string>         nick_by_fd;
+    std::unordered_map<std::string, int>         fd_by_nick;
+    std::unordered_map<int, std::string>         fingerprint_hex_by_fd;
+    std::unordered_map<std::string, int>         fd_by_fingerprint;
     std::unordered_map<std::string, std::string> nick_by_fingerprint;
-    std::unordered_map<std::string, std::vector<unsigned char>> eph_by_fingerprint;
-    std::unordered_map<std::string, std::vector<unsigned char>> identity_pk_by_fingerprint;
-    std::unordered_map<std::string, std::vector<unsigned char>> hello_message_by_fingerprint;
+    std::unordered_map<std::string, std::vector<unsigned char>>
+        eph_by_fingerprint;
+    std::unordered_map<std::string, std::vector<unsigned char>>
+        identity_pk_by_fingerprint;
+    std::unordered_map<std::string, std::vector<unsigned char>>
+        hello_message_by_fingerprint;
 };
-
 
 // Returns empty string on success, error message on failure
 static std::string validate_hello_basics(const Parsed &p, std::string &uname,
@@ -82,7 +85,6 @@ static void cleanup_old_nickname(SessionData &sd, int client_fd,
     sd.nick_by_fd.erase(client_fd);
 }
 
-
 static bool check_username_conflicts(SessionData &sd, const std::string &uname,
                                      int client_fd, std::vector<int> &to_remove)
 {
@@ -117,9 +119,8 @@ static void register_client(SessionData &sd, int client_fd,
 
     // In handle_hello_message → register_client block
     // Compute fingerprint if identity key present
-    std::string fp_hex = p.identity_pk.empty()
-                       ? ""
-                       : compute_fingerprint_hex(p.identity_pk);
+    std::string fp_hex =
+        p.identity_pk.empty() ? "" : compute_fingerprint_hex(p.identity_pk);
 
     // Always register nickname
     sd.nick_by_fd[client_fd] = uname;

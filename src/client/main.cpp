@@ -21,7 +21,6 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
-#include <asio.hpp>
 #include <atomic>
 #include <chrono>
 #include <cmath>

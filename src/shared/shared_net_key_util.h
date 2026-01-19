@@ -11,7 +11,7 @@
 #include <Poco/FileStream.h>
 #include <array>
 #include <asio.hpp>
-#include <asio/ssl.hpp>
+
 #include <functional>
 #include <iostream>
 #include <memory>

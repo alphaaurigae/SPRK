@@ -2,7 +2,7 @@
 #define SHARED_NET_REKEY_UTIL_H
 
 #include <Poco/Timestamp.h>
-#include <asio.hpp>
+#include <asio/io_context.hpp>
 #include <asio/steady_timer.hpp>
 #include <chrono>
 #include <cstdint>
@@ -55,7 +55,7 @@ should_rekey(uint32_t sequence_number,
            (current_time_ms - last_message_time_ms) > timeout_ms;
 }
 
-[[nodiscard]] constexpr std::string
+[[nodiscard]] inline std::string
 build_key_derivation_context(std::string_view fp1,
                              std::string_view fp2) noexcept
 {
@@ -63,7 +63,7 @@ build_key_derivation_context(std::string_view fp1,
                        : std::string(fp2) + "|" + std::string(fp1);
 }
 
-[[nodiscard]] constexpr std::string
+[[nodiscard]] inline std::string
 build_username_context(std::string_view username1,
                        std::string_view username2) noexcept
 {
@@ -260,6 +260,9 @@ class RekeyTimeoutManager
                         std::function<void()>     callback)
     {
         auto timer = std::make_shared<OneShotTimer>(io_);
+
+        // Keep timer in pending list so cleanup can prune it later
+        pending_timers_.push_back(timer);
 
         // Capture timer as shared_ptr to keep it alive until callback completes
         timer->start(delay,

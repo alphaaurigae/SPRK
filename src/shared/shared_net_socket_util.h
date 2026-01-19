@@ -3,6 +3,7 @@
 
 #include <arpa/inet.h>
 #include <asio.hpp>
+#include <asio/ip/tcp.hpp>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>

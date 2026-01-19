@@ -5,6 +5,30 @@ IFS=$'\n\t'
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 WORKDIR_NAME="SPRK" # Verify repository root (check_workdir in bash/shared/default.sh), make sure we only run in WORKLDIR_NAME.
+
+# SERVER IP/DOMAIN:PORT FOR TESTING
+SERVER_IPV4="127.0.0.1"
+SERVER_PORTV4="1566"
+
+#BINS FOR TESTING
+SERVER_BIN="$ROOT_DIR/server.sh"
+CLIENT_BIN="$ROOT_DIR/client.sh"
+
+# SESSION ID FOR TESTING
+SESSION_ID_001="nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK"
+
+
+# KEY / CERT FOR TESTING
+KEY_RON_PEM="$ROOT_DIR/sample/ron.sk.pem"
+CERT_RON="$ROOT_DIR/sample/ron.crt"
+
+KEY_BETH_PEM="$ROOT_DIR/sample/beth.sk.pem"
+CERT_BETH="$ROOT_DIR/sample/beth.crt"
+
+KEY_BOB_PEM="$ROOT_DIR/sample/bob.sk.pem"
+CERT_BOB="$ROOT_DIR/sample/bob.crt"
+
+
 TIMESTAMP=$(date +%Y%m%d_%H%M%S) # timestamp.
 
 ################################

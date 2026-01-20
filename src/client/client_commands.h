@@ -1,18 +1,13 @@
 #ifndef CLIENT_COMMANDS_H
 #define CLIENT_COMMANDS_H
 
-#include "client_peer_disconnect.h"
-#include "client_peer_manager.h"
-#include "client_runtime.h"
 #include "shared_common_util.h"
-#include "shared_net_message_util.h"
+#include "shared_net_common_protocol.h"
 #include "shared_net_tls_frame_io.h"
+#include "shared_net_username_util.h"
 
-#include <algorithm>
-#include <iostream>
 #include <mutex>
 #include <openssl/ssl.h>
-#include <string>
 #include <vector>
 
 // Strong type to prevent swapping msg and recipient_fp
@@ -23,6 +18,13 @@ struct RecipientFP
     [[nodiscard]] const std::string &str() const & { return value; }
     [[nodiscard]] std::string      &&str()      &&{ return std::move(value); }
 };
+
+// Forward declarations from client_runtime.h and client_peer_disconnect.h
+extern std::mutex ssl_io_mtx;
+extern std::atomic_bool is_connected;
+extern std::atomic_bool should_reconnect;
+void handle_disconnect(const std::string &username, const std::string &fp_hex);
+
 
 // Recipient parsing
 inline std::vector<std::string> parse_recipient_list(const std::string &input)

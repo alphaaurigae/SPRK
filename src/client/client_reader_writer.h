@@ -1,28 +1,36 @@
 #ifndef CLIENT_READER_WRITER_H
 #define CLIENT_READER_WRITER_H
 
-#include "client_crypto_util.h"
+#include "client_commands.h"
 #include "client_message_util.h"
 #include "client_peer_disconnect.h"
-#include "client_peer_manager.h"
-#include "client_runtime.h"
-#include "client_session.h"
-#include "shared_common_crypto.h"
+
 #include "shared_common_util.h"
 #include "shared_net_common_protocol.h"
-#include "shared_net_key_util.h"
+#include "shared_net_rekey_util.h"
 #include "shared_net_tls_frame_io.h"
 
 #include <atomic>
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <mutex>
 #include <openssl/ssl.h>
 #include <poll.h>
-#include <span>
 #include <string>
 #include <thread>
 #include <unistd.h>
-#include <vector>
+
+
+// Forward declarations
+void handle_hello(const Parsed &p, int sock);
+void handle_chat(const Parsed &p);
+void process_list_response(const Parsed &p);
+void process_pubkey_response(const Parsed &p);
+std::vector<std::string> parse_recipient_list(const std::string &input);
+std::vector<std::string> resolve_fingerprint_recipients(const std::vector<std::string> &recipients);
+std::vector<std::string> get_ready_recipients(const std::vector<std::string> &resolved);
+bool send_message_to_peer(int sock, const std::string &msg, const RecipientFP &recipient_fp, SSL *ssl);
 
 inline void reader_thread(int sock, SSL *ssl)
 {

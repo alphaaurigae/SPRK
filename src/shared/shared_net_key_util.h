@@ -2,7 +2,6 @@
 #define SHARED_NET_KEY_UTIL_H
 
 #include "shared_common_crypto.h"
-#include "shared_common_util.h"
 #include "shared_net_common_protocol.h"
 
 #include <Poco/Buffer.h>
@@ -13,15 +12,15 @@
 #include <asio.hpp>
 
 #include <functional>
-#include <iostream>
 #include <memory>
+#include <optional>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <string>
-#include <utility>
 #include <variant>
-#include <vector>
+
+namespace asio { class io_context; }
 
 struct PQKeypair
 {

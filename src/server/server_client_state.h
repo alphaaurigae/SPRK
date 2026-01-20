@@ -1,11 +1,13 @@
 #ifndef SERVER_CLIENT_STATE_H
 #define SERVER_CLIENT_STATE_H
 
-#include <algorithm>
+#include "shared_net_socket_util.h"
+
 #include <memory>
 #include <openssl/ssl.h>
 #include <unistd.h>
 #include <vector>
+#include <sys/select.h>
 
 struct AsioSSLContextWrapper;
 

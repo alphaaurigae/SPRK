@@ -1,29 +1,30 @@
 #ifndef CLIENT_SESSION_H
 #define CLIENT_SESSION_H
 
-#include "client_crypto_util.h"
-#include "client_runtime.h"
-#include "shared_common_util.h"
+
+#include "shared_common_crypto.h"
 #include "shared_net_common_protocol.h"
 #include "shared_net_key_util.h"
-#include "shared_net_rekey_util.h"
+#include "shared_net_socket_util.h"
 #include "shared_net_tls_frame_io.h"
 #include "shared_net_username_util.h"
 
-#include <algorithm>
-#include <functional>
+#include <cstdint>
 #include <iostream>
-#include <memory>
 #include <mutex>
+#include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <span>
-#include <string>
+#include <unistd.h>
 #include <vector>
 
-extern std::string   session_id;
+// Forward declarations from client_peer_manager.h
+extern std::string session_id;
 extern secure_vector my_eph_pk;
 extern secure_vector my_eph_sk;
-extern std::string   my_username;
+extern secure_vector my_identity_pk;
+extern secure_vector my_identity_sk;
+extern std::string my_username;
 
 inline bool setup_session_id(std::span<char *> args)
 {

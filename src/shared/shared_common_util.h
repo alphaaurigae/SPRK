@@ -1,22 +1,20 @@
 #ifndef SHARED_COMMON_UTIL_H
 #define SHARED_COMMON_UTIL_H
 
-#include <array>
+
 
 #include <atomic>
-#include <cctype>
-
+#include <cstddef>
 #include <cstdint>
-#include <ctime>
 #include <format>
 #include <fstream>
-#include <iostream>
-
 #include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <ctime>
+#include <iostream>
 #include <vector>
 
 inline std::atomic_bool debug_mode{false};

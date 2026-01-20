@@ -2,45 +2,38 @@
 #define CLIENT_CRYPTO_UTIL_H
 
 #include "client_peer_manager.h"
-#include "client_runtime.h"
 #include "shared_common_crypto.h"
 #include "shared_common_util.h"
 #include "shared_net_common_protocol.h"
-#include "shared_net_key_util.h"
-#include "shared_net_message_util.h"
 #include "shared_net_rekey_util.h"
-#include "shared_net_socket_util.h"
-#include "shared_net_tls_context.h"
 #include "shared_net_tls_frame_io.h"
-#include "shared_net_username_util.h"
 
-#include <algorithm>
-#include <arpa/inet.h>
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <cmath>
-#include <csignal>
-#include <cstdio>
-#include <ctime>
-#include <fstream>
-#include <iomanip>
+#include <cstdint>
 #include <iostream>
 #include <mutex>
-#include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/provider.h>
-#include <openssl/ssl.h>
-#include <span>
-#include <sstream>
 #include <string>
-#include <string_view>
-#include <sys/socket.h>
-#include <thread>
-#include <unistd.h>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
+#include <string>
+
+#ifdef USE_LIBOQS
+#include <oqs/oqs.h>
+#endif
+
+struct PeerInfo;
+
+// Forward declarations for globals from client_peer_manager.h
+extern std::unordered_map<std::string, PeerInfo> peers;
+extern std::mutex peers_mtx;
+extern secure_vector my_eph_pk;
+extern secure_vector my_eph_sk;
+extern secure_vector my_identity_pk;
+extern secure_vector my_identity_sk;
+extern std::string my_username;
+extern std::string my_fp_hex;
+extern std::string session_id;
+extern std::mutex ssl_io_mtx;
+extern SSL *ssl;
 
 inline bool init_oqs_provider()
 
@@ -59,32 +52,17 @@ inline bool init_oqs_provider()
     return true;
 }
 
-struct KeyPath
-{
-    std::string value;
-};
-struct AlgorithmName
-{
-    std::string value;
-};
+struct KeyPath;
+
+struct AlgorithmName;
+
 static void rotate_ephemeral_if_needed([[maybe_unused]] int sock,
                                        const std::string   &peer_fp)
 {
-    bool do_rotate = false;
-    {
-        const std::lock_guard<std::mutex> lk(peers_mtx);
-        const auto                        it = peers.find(peer_fp);
-        if (it != peers.end() &&
-            should_rekey(it->second.send_seq, REKEY_INTERVAL))
-        {
-            do_rotate = true;
-        }
-    }
-    if (!do_rotate)
+    const std::lock_guard<std::mutex> lk(peers_mtx);
+    const auto it = peers.find(peer_fp);
+    if (it == peers.end() || !should_rekey(it->second.send_seq, REKEY_INTERVAL))
         return;
-
-    // ---- REMOVE THE rtm LINE COMPLETELY ----
-    // We keep the timer code in main.cpp only, so no "rtm" here
 
     const auto                 ms       = get_current_timestamp_ms();
     auto                       eph_pair = pqkem_keypair(KEM_ALG_NAME);

@@ -1,13 +1,19 @@
 #ifndef SERVER_HANDLERS_H
 #define SERVER_HANDLERS_H
 
+#include "server_client_state.h"
 #include "server_session.h"
-#include "shared_net_rekey_util.h" // For get_current_timestamp_ms()
+#include "shared_net_common_protocol.h"
+#include "shared_net_rekey_util.h"
+#include "shared_net_tls_frame_io.h"
 
-#include <ctime>
+#include <algorithm>
+#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+uint64_t get_current_timestamp_ms() noexcept;
 
 static void broadcast_hello_to_peers(const SessionData &sd, int client_fd,
                                      const std::vector<unsigned char> &frame,

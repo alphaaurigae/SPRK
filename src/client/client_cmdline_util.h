@@ -2,13 +2,12 @@
 #define CLIENT_CMDLINE_H
 
 #include "shared_common_util.h"
+#include "shared_net_username_util.h"
 
 #include <cstdlib>
 #include <iostream>
 #include <span>
-#include <string>
 
-// --- 1. Command line parsing ---
 struct ConnectionConfig
 {
     std::string server;

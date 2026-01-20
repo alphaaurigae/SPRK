@@ -1,14 +1,13 @@
 #ifndef SHARED_NET_TLS_CONTEXT_H
 #define SHARED_NET_TLS_CONTEXT_H
 
-#include "shared_net_common_protocol.h"
 
-#include <iostream>
 #include <memory>
 #include <openssl/err.h>
 #include <openssl/provider.h>
 #include <openssl/ssl.h>
 #include <string_view>
+#include <iostream>
 
 // Centralized TLS configuration strings (used in apply_pq_security_policy and
 // success message)

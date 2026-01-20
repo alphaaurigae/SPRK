@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+template<typename T> struct PeerMap;
+
 struct MessageContext
 {
     std::vector<unsigned char> aad;

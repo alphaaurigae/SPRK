@@ -6,14 +6,13 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstring>
 #include <memory>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
-#include <openssl/sha.h>
+
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -22,6 +21,8 @@
 
 #ifdef USE_LIBOQS
 #include <oqs/oqs.h>
+//struct OQS_KEM;
+//struct OQS_SIG;
 #endif
 
 inline constexpr std::size_t KEY_LEN     = 32;

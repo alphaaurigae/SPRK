@@ -2,9 +2,11 @@
 #define CLIENT_RUNTIME_H
 
 #include <atomic>
-#include <memory>
 #include <mutex>
 #include <openssl/ssl.h>
+
+//struct SSL;
+//struct SSL_CTX;
 
 struct AsioSSLContextWrapper;
 

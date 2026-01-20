@@ -1,18 +1,18 @@
 #ifndef CLIENT_PEER_MANAGER_H
 #define CLIENT_PEER_MANAGER_H
 
-#include "client_runtime.h"
+
 #include "shared_common_crypto.h"
 #include "shared_common_util.h"
-#include "shared_net_common_protocol.h"
-#include "shared_net_key_util.h"
+#include "shared_net_rekey_util.h"
 
-#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
+
+struct Parsed;
 
 struct PeerInfo
 {

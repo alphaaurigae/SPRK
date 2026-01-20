@@ -3,11 +3,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <openssl/rand.h>
 #include <ranges>
-#include <string>
 #include <string_view>
-#include <unordered_map>
-#include <vector>
 
 constexpr size_t MAX_USERNAME_LENGTH = 64;
 constexpr size_t MIN_USERNAME_LENGTH = 1;

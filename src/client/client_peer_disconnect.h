@@ -4,7 +4,7 @@
 #include "client_peer_manager.h"
 
 #include <mutex>
-#include <string>
+
 
 inline void handle_disconnect(const std::string &username,
                               const std::string &fp_hex)

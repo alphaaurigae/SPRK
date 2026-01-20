@@ -1,11 +1,16 @@
 #ifndef SERVER_SESSION_H
 #define SERVER_SESSION_H
 
+#include "shared_common_crypto.h"
+#include "shared_common_util.h"
 #include "shared_net_common_protocol.h"
+#include "shared_net_username_util.h"
 
+#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
 
 struct SessionData
 {

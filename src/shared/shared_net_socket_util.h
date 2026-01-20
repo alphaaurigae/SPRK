@@ -1,19 +1,20 @@
 #ifndef SHARED_NET_SOCKET_UTIL_H
 #define SHARED_NET_SOCKET_UTIL_H
 
-#include <arpa/inet.h>
+
 #include <asio.hpp>
 #include <asio/ip/tcp.hpp>
 #include <cerrno>
 #include <cstring>
-#include <fcntl.h>
 #include <memory>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <string>
 #include <sys/socket.h>
 #include <system_error>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <unistd.h>
+
+//namespace asio { class io_context; namespace ip { namespace tcp { class acceptor; class socket; }}}
 
 #ifndef NET_SOCKET_UTIL_DEBUG
 #define NET_SOCKET_UTIL_DEBUG 0

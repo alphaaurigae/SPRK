@@ -50,9 +50,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // ──────────────────────────────
     // Initialize TLS context
-    // ──────────────────────────────
     auto ctx = init_tls_server_context("sample/sample_test_cert/server.crt",
                                        "sample/sample_test_cert/server.key",
                                        "sample/sample_test_cert/ca.crt");
@@ -122,7 +120,6 @@ int main(int argc, char **argv)
         }
     }
 
-    // Cleanup
     clients.clear();
     if (ssl_obj)
     {

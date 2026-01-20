@@ -1,21 +1,48 @@
 #ifndef CLIENT_MESSAGE_UTIL_H
 #define CLIENT_MESSAGE_UTIL_H
 
-#include "client_commands.h"
-#include "client_peer_disconnect.h"
+#include "client_crypto_util.h"
 #include "client_peer_manager.h"
-#include "client_session.h"
 #include "shared_common_crypto.h"
 #include "shared_common_util.h"
+#include "shared_net_common_protocol.h"
 #include "shared_net_key_util.h"
+#include "shared_net_message_util.h"
+#include "shared_net_rekey_util.h"
 #include "shared_net_tls_frame_io.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <iostream>
 #include <mutex>
+#include <openssl/ssl.h>
 #include <string>
 #include <unordered_set>
 #include <vector>
+
+struct RecipientFP;
+
+// Forward declarations from client_runtime.h
+extern std::mutex ssl_io_mtx;
+extern SSL *ssl;
+extern std::atomic_bool is_connected;
+
+// Forward declarations from client_peer_disconnect.h
+void handle_disconnect(const std::string &username, const std::string &fp_hex);
+
+// Forward declarations from client_crypto_util.h
+bool validate_username(const std::string &peer_name, uint64_t ms);
+bool check_peer_limits(const std::string &peer_key, uint64_t ms);
+bool check_rate_and_signature(PeerInfo &pi, const Parsed &p, const std::string &peer_name, uint64_t ms);
+struct ExpectedLengths;
+bool get_expected_lengths(ExpectedLengths &lengths, uint64_t ms);
+bool validate_eph_pk_length(const Parsed &p, size_t expected_pk_len, const std::string &peer_name, uint64_t ms);
+bool handle_encaps_present(PeerInfo &pi, const Parsed &p, size_t expected_ct_len, const std::string &key_context, const std::string &peer_name, uint64_t ms);
+bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p, const std::string &key_context, int sock, const std::string &peer_name, int64_t ms);
+void log_awaiting_encaps(const std::string &peer_name, uint64_t ms);
+std::string build_key_context_for_peer(const std::string &my_fp, const std::string &peer_fp_hex_ref, const std::string &session_id_val);
+void rotate_ephemeral_if_needed(int sock, const std::string &peer_fp);
 
 void handle_hello(const Parsed &p, int sock)
 {

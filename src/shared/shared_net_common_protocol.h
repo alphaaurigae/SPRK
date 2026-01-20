@@ -3,12 +3,9 @@
 
 #include <array>
 #include <cstdint>
-#include <cstring>
-#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <vector>
 
 constexpr uint8_t PROTO_VERSION = 1;

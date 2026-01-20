@@ -8,9 +8,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <optional>
-#include <string>
-#include <string_view>
+#include <vector>
+
+//namespace asio { class io_context; class steady_timer; }
 
 constexpr uint32_t DEFAULT_REKEY_INTERVAL     = 1024;
 constexpr uint32_t DEFAULT_MAX_SEQ_GAP        = 100;

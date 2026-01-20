@@ -4,10 +4,13 @@
 #include "shared_common_util.h"
 
 #include <cstdint>
-#include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <vector>
 
+// Forward declare for inline use
+using ::read_u32_be;
+
+// inline uint32_t read_u32_be(const unsigned char *p) noexcept;
 inline ssize_t tls_full_recv(SSL *ssl, void *buf, size_t len)
 {
     size_t total = 0;

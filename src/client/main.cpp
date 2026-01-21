@@ -19,11 +19,13 @@
 #include "client_session.h"
 
 #include <algorithm>
-#include <arpa/inet.h>
+#include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <cmath>
+
 #include <csignal>
 #include <cstdio>
 #include <ctime>
@@ -31,17 +33,14 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
-#include <netinet/in.h>
-#include <openssl/err.h>
-#include <openssl/provider.h>
-#include <openssl/ssl.h>
+
 #include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <sys/socket.h>
+
 #include <thread>
-#include <unistd.h>
+
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -70,14 +69,7 @@ try
         return 1;
     }
 
-    asio::io_context    io;
-    RekeyTimeoutManager rtm(io); // Initialize with io
-
-    std::thread io_thread(
-        [&io]
-        {
-            io.run(); // Run Asio event loop for timers
-        });
+    asio::io_context io;
 
     if (args.size() < 6)
     {
@@ -89,7 +81,7 @@ try
 
     crypto_init();
 
-    // Initialize TLS context (this also loads OQS providers)
+    // Initialize TLS context
     std::string cert_path =
         std::string("sample/sample_test_cert/") + my_username + ".crt";
     std::string key_path =
@@ -103,33 +95,37 @@ try
         return 1;
     }
 
-    // Load OQS provider for protocol-level crypto (separate from TLS)
-    if (!init_oqs_provider())
-    {
-        std::cerr
-            << "Cannot continue without OQS provider for protocol crypto\n";
-        ssl_ctx.reset();
-        return 1;
-    }
+    secure_vector persisted_eph_pk;
+    secure_vector persisted_eph_sk;
+    bool          have_persisted_eph = false;
 
-    {
-        const std::lock_guard<std::mutex> lk(ssl_io_mtx);
-        ssl =
-            SSL_new(ssl_ctx->native_handle()); // create SSL* from Asio context
-        if (!ssl)
+    uint32_t          reconnect_attempts = 0;
+    std::atomic<bool> connection_complete{false};
+
+    auto        io_work = asio::require(io.get_executor(),
+                                        asio::execution::outstanding_work.tracked);
+    std::thread io_thread(
+        [&io, work = std::move(io_work)]
         {
-            std::cerr << "Failed to create SSL object\n";
-            ssl_ctx.reset();
-            return 1;
-        }
-    }
-
-    secure_vector    persisted_eph_pk;
-    secure_vector    persisted_eph_sk;
-    bool             have_persisted_eph = false;
-    asio::io_context backoff_io;
-
-    uint32_t reconnect_attempts = 0;
+            std::cout << "[" << get_current_timestamp_ms()
+                      << "] io_context thread started\n";
+            try
+            {
+                io.run();
+            }
+            catch (const std::exception &e)
+            {
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] io_context exception: " << e.what() << "\n";
+            }
+            catch (...)
+            {
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] io_context unknown exception\n";
+            }
+            std::cout << "[" << get_current_timestamp_ms()
+                      << "] io_context thread exiting\n";
+        });
 
     while (should_reconnect && reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
     {
@@ -142,53 +138,50 @@ try
                       << "] reconnecting in " << backoff << "ms (attempt "
                       << reconnect_attempts + 1 << ")\n";
 
-            OneShotTimer      backoff_timer(backoff_io);
-            std::atomic<bool> backoff_done{false};
-            backoff_timer.start(std::chrono::milliseconds(backoff),
-                                [&](const std::error_code &)
-                                { backoff_done = true; });
-
-            while (!backoff_done)
-            {
-                backoff_io.poll_one();
-            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
         }
 
-        const int s =
-            attempt_connection(config.server, config.port, persisted_eph_pk,
-                               persisted_eph_sk, have_persisted_eph);
-        if (s < 0)
+        connection_complete = false;
+        attempt_connection_async(io, config.server, config.port,
+                                 persisted_eph_pk, persisted_eph_sk,
+                                 have_persisted_eph,
+                                 [&connection_complete](bool success)
+                                 {
+                                     if (success)
+                                     {
+                                         is_connected = true;
+                                     }
+                                     connection_complete = true;
+                                 });
+
+        while (!connection_complete)
+
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        if (!is_connected)
         {
             ++reconnect_attempts;
             continue;
         }
 
-        is_connected       = true;
         reconnect_attempts = 0;
 
-        std::thread reader(reader_thread, s, ssl);
-        std::thread writer(writer_thread, s, ssl);
+        // std::thread reader(reader_thread);
+        std::thread writer(writer_thread);
 
         writer.join();
-        reader.join();
+        // reader.join();
 
         {
             std::lock_guard<std::mutex> lk(ssl_io_mtx);
-            if (ssl)
+            if (ssl_stream)
             {
-                if (SSL_is_init_finished(ssl))
-                {
-                    SSL_shutdown(ssl);
-                }
-                SSL_free(ssl);
-                ssl = nullptr;
+                std::error_code ec;
+                ssl_stream->lowest_layer().close(ec);
+                ssl_stream.reset();
             }
-        }
-
-        if (close(s) != 0)
-        {
-            std::cerr << "[" << get_current_timestamp_ms()
-                      << "] Socket close failed: " << strerror(errno) << "\n";
         }
 
         {
@@ -210,21 +203,18 @@ try
 
     {
         const std::lock_guard<std::mutex> lk(ssl_io_mtx);
-        if (ssl)
+        if (ssl_stream)
         {
-            if (SSL_is_init_finished(ssl))
-            {
-                SSL_shutdown(ssl);
-            }
-            SSL_free(ssl);
-            ssl = nullptr;
+            std::error_code ec;
+            ssl_stream->lowest_layer().close(ec);
+            ssl_stream.reset();
         }
     }
     io.stop();
     if (io_thread.joinable())
         io_thread.join();
 
-    ssl_ctx.reset(); // shared_ptr releases the context automatically
+    ssl_ctx.reset();
 
     return 0;
 }

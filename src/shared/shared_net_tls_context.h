@@ -1,13 +1,13 @@
 #ifndef SHARED_NET_TLS_CONTEXT_H
 #define SHARED_NET_TLS_CONTEXT_H
 
-
+#include <asio/ssl.hpp>
+#include <iostream>
 #include <memory>
 #include <openssl/err.h>
 #include <openssl/provider.h>
 #include <openssl/ssl.h>
 #include <string_view>
-#include <iostream>
 
 // Centralized TLS configuration strings (used in apply_pq_security_policy and
 // success message)
@@ -132,48 +132,28 @@ load_certificates(SSL_CTX *ctx, const TLSContextConfig &config) noexcept
     return true;
 }
 
-[[nodiscard]] inline SSL_CTX *
-init_tls_context(const TLSContextConfig &config) noexcept
+[[nodiscard]] inline std::shared_ptr<asio::ssl::context>
+init_tls_context_asio(const TLSContextConfig &config) noexcept
 {
     if (!init_openssl_providers())
-    {
         return nullptr;
-    }
 
-    const SSL_METHOD *method =
-        config.is_server ? TLS_server_method() : TLS_client_method();
-    SSL_CTX *ctx = SSL_CTX_new_ex(nullptr, nullptr, method);
-    if (!ctx)
-    {
-        std::cerr << "SSL_CTX_new failed\n";
-        ERR_print_errors_fp(stderr);
+    auto ctx = std::make_shared<asio::ssl::context>(
+        config.is_server ? asio::ssl::context::tls_server
+                         : asio::ssl::context::tls_client);
+
+    SSL_CTX *raw = ctx->native_handle();
+    if (!apply_pq_security_policy(raw))
         return nullptr;
-    }
-
-    if (!apply_pq_security_policy(ctx))
-    {
-        SSL_CTX_free(ctx);
+    if (!load_certificates(raw, config))
         return nullptr;
-    }
-
-    if (!load_certificates(ctx, config))
-    {
-        SSL_CTX_free(ctx);
+    if (!load_ca_bundle(raw, config.ca_path))
         return nullptr;
-    }
-
-    if (!load_ca_bundle(ctx, config.ca_path))
-    {
-        SSL_CTX_free(ctx);
-        return nullptr;
-    }
-
     const int verify_mode =
         config.require_peer_cert
             ? (SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
             : SSL_VERIFY_PEER;
-    SSL_CTX_set_verify(ctx, verify_mode, nullptr);
-
+    SSL_CTX_set_verify(raw, verify_mode, nullptr);
     const char *role = config.is_server ? "Server" : "Client";
     std::cout << role << " TLS context ready:\n"
               << "  Cert: " << config.cert_path << "\n"
@@ -181,10 +161,8 @@ init_tls_context(const TLSContextConfig &config) noexcept
               << "  CA:   " << config.ca_path << "\n"
               << "  Hybrid KEM: " << TLS_HYBRID_KEM_DISPLAY << "\n"
               << "  Cipher suites: " << TLS_CIPHER_DISPLAY << "\n";
-
     return ctx;
 }
-
 struct AsioSSLContextWrapper
 {
     SSL_CTX *ctx;
@@ -201,23 +179,18 @@ struct AsioSSLContextWrapper
     SSL_CTX *native_handle() const noexcept { return ctx; }
 };
 
-[[nodiscard]] inline std::shared_ptr<AsioSSLContextWrapper>
+[[nodiscard]] inline std::shared_ptr<asio::ssl::context>
 init_tls_server_context(std::string_view cert, std::string_view key,
                         std::string_view ca) noexcept
+
 {
-    SSL_CTX *raw = init_tls_context({cert, key, ca, true, true});
-    if (!raw)
-        return nullptr;
-    return std::make_shared<AsioSSLContextWrapper>(raw);
+    return init_tls_context_asio({cert, key, ca, true, true});
 }
 
-[[nodiscard]] inline std::shared_ptr<AsioSSLContextWrapper>
+[[nodiscard]] inline std::shared_ptr<asio::ssl::context>
 init_tls_client_context(std::string_view cert, std::string_view key,
                         std::string_view ca) noexcept
 {
-    SSL_CTX *raw = init_tls_context({cert, key, ca, false, true});
-    if (!raw)
-        return nullptr;
-    return std::make_shared<AsioSSLContextWrapper>(raw);
+    return init_tls_context_asio({cert, key, ca, false, true});
 }
 #endif

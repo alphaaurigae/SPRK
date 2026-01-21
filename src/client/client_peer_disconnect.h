@@ -5,7 +5,6 @@
 
 #include <mutex>
 
-
 inline void handle_disconnect(const std::string &username,
                               const std::string &fp_hex)
 {

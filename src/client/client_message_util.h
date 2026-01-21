@@ -13,41 +13,123 @@
 
 #include <algorithm>
 #include <array>
+#include <asio/io_context.hpp>
+#include <asio/post.hpp>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <mutex>
-#include <openssl/ssl.h>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 struct RecipientFP;
 
-// Forward declarations from client_runtime.h
-extern std::mutex ssl_io_mtx;
-extern SSL *ssl;
-extern std::atomic_bool is_connected;
+extern std::mutex                  ssl_io_mtx;
+extern std::shared_ptr<ssl_socket> ssl_stream;
+extern std::atomic_bool            is_connected;
 
-// Forward declarations from client_peer_disconnect.h
 void handle_disconnect(const std::string &username, const std::string &fp_hex);
 
-// Forward declarations from client_crypto_util.h
 bool validate_username(const std::string &peer_name, uint64_t ms);
 bool check_peer_limits(const std::string &peer_key, uint64_t ms);
-bool check_rate_and_signature(PeerInfo &pi, const Parsed &p, const std::string &peer_name, uint64_t ms);
+bool check_rate_and_signature(PeerInfo &pi, const Parsed &p,
+                              const std::string &peer_name, uint64_t ms);
 struct ExpectedLengths;
-bool get_expected_lengths(ExpectedLengths &lengths, uint64_t ms);
-bool validate_eph_pk_length(const Parsed &p, size_t expected_pk_len, const std::string &peer_name, uint64_t ms);
-bool handle_encaps_present(PeerInfo &pi, const Parsed &p, size_t expected_ct_len, const std::string &key_context, const std::string &peer_name, uint64_t ms);
-bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p, const std::string &key_context, int sock, const std::string &peer_name, int64_t ms);
-void log_awaiting_encaps(const std::string &peer_name, uint64_t ms);
-std::string build_key_context_for_peer(const std::string &my_fp, const std::string &peer_fp_hex_ref, const std::string &session_id_val);
-void rotate_ephemeral_if_needed(int sock, const std::string &peer_fp);
+bool        get_expected_lengths(ExpectedLengths &lengths, uint64_t ms);
+bool        validate_eph_pk_length(const Parsed &p, size_t expected_pk_len,
+                                   const std::string &peer_name, uint64_t ms);
+bool        handle_encaps_present(PeerInfo &pi, const Parsed &p,
+                                  size_t             expected_ct_len,
+                                  const std::string &key_context,
+                                  const std::string &peer_name, uint64_t ms);
+bool        try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
+                                        const std::string &key_context,
+                                        const std::string &peer_name, int64_t ms);
+void        log_awaiting_encaps(const std::string &peer_name, uint64_t ms);
+std::string build_key_context_for_peer(const std::string &my_fp,
+                                       const std::string &peer_fp_hex_ref,
+                                       const std::string &session_id_val);
+void        rotate_ephemeral_if_needed(const std::string &peer_fp);
 
-void handle_hello(const Parsed &p, int sock)
+inline std::string get_fingerprint_for_user(const std::string &username)
+
+{
+
+    const auto itset = fps_by_username.find(username);
+    if (itset != fps_by_username.end() && !itset->second.empty())
+
+    {
+        return *itset->second.begin();
+    }
+    return "(no fp)";
+}
+
+inline void process_list_response(const Parsed &p)
+{
+
+    const std::lock_guard<std::mutex> lk(peers_mtx);
+    std::cerr << "[" << get_current_timestamp_ms()
+              << "] process_list_response: users_count=" << p.users.size()
+              << "\n";
+    std::cout << "users:\n";
+
+    for (const auto &u : p.users)
+    {
+        std::string fp_display =
+            (u == my_username && !my_identity_pk.empty())
+                ? fingerprint_to_hex(
+                      fingerprint_sha256(std::vector<unsigned char>(
+                          my_identity_pk.begin(), my_identity_pk.end())))
+                : get_fingerprint_for_user(u);
+
+        std::cout << u << " [" << fp_display << "]\n";
+    }
+}
+
+inline void process_pubkey_response(const Parsed &p)
+{
+
+    const std::string hexpk =
+        p.identity_pk.empty()
+            ? std::string("(no pk)")
+            : to_hex(p.identity_pk.data(), p.identity_pk.size());
+
+    std::cerr << "[" << get_current_timestamp_ms()
+              << "] process_pubkey_response: username='" << p.username
+              << "' pk_len=" << p.identity_pk.size() << "\n";
+    if (!p.identity_pk.empty())
+    {
+        try
+        {
+            const std::string fhex = compute_fingerprint_hex(p.identity_pk);
+
+            const std::lock_guard<std::mutex> lk(peers_mtx);
+            auto                             &pi = peers[fhex];
+            pi.identity_pk =
+                secure_vector(p.identity_pk.begin(), p.identity_pk.end());
+            if (!p.username.empty())
+            {
+                pi.username = p.username;
+                fps_by_username[p.username].insert(fhex);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            dev_println("fingerprint error: " + std::string(e.what()));
+        }
+    }
+    std::cout << "pubkey " << p.username << " " << hexpk << "\n";
+}
+
+inline void handle_hello(const Parsed &p)
 {
     const std::string peer_name = trim(p.username);
-    std::cerr << "[CLIENT] Received hello from " << peer_name << "\n";
+    std::cerr << "[" << get_current_timestamp_ms() << "] handle_hello: from='"
+              << peer_name << "' eph_pk_len=" << p.eph_pk.size()
+              << " encaps_len=" << p.encaps.size() << "\n";
 
     const auto ms = get_current_timestamp_ms();
     if (!validate_username(peer_name, ms))
@@ -63,8 +145,14 @@ void handle_hello(const Parsed &p, int sock)
         return;
     }
     const std::string peer_key = peer_key_opt.value();
-    auto             &pi       = peers[peer_key];
-    auto             &fps_set  = fps_by_username[peer_name];
+    std::cerr << "[" << ms << "] handle_hello: computed peer_key prefix="
+              << (peer_key.size() ? peer_key.substr(0, std::min<size_t>(
+                                                           peer_key.size(), 16))
+                                  : "(empty)")
+              << "\n";
+
+    auto &pi      = peers[peer_key];
+    auto &fps_set = fps_by_username[peer_name];
     update_peer_info(pi, peer_name, peer_fp_hex, fps_set);
 
     if (!check_peer_limits(peer_key, ms))
@@ -108,15 +196,21 @@ void handle_hello(const Parsed &p, int sock)
                 const std::vector<unsigned char> req{PROTO_VERSION,
                                                      MSG_LIST_REQUEST};
                 const auto                       frame = build_frame(req);
-                std::lock_guard<std::mutex>      lk(ssl_io_mtx);
-                tls_full_send(ssl, frame.data(), frame.size());
+                auto                             frame_ptr =
+                    std::make_shared<std::vector<unsigned char>>(frame);
+                std::lock_guard<std::mutex> lk2(ssl_io_mtx);
+                if (ssl_stream)
+                {
+                    async_write_frame(
+                        ssl_stream, frame_ptr,
+                        [frame_ptr](const std::error_code &, std::size_t) {});
+                }
             }
         }
     }
     else if (i_am_initiator && !pi.sent_hello)
     {
-        if (try_handle_initiator_encaps(pi, p, key_context, sock, peer_name,
-                                        ms))
+        if (try_handle_initiator_encaps(pi, p, key_context, peer_name, ms))
         {
             if (!was_ready && pi.ready)
             {
@@ -124,6 +218,7 @@ void handle_hello(const Parsed &p, int sock)
             }
         }
     }
+
     else if (!i_am_initiator)
     {
         if (!p.encaps.empty())
@@ -138,8 +233,15 @@ void handle_hello(const Parsed &p, int sock)
                     const std::vector<unsigned char> req{PROTO_VERSION,
                                                          MSG_LIST_REQUEST};
                     const auto                       frame = build_frame(req);
-                    std::lock_guard<std::mutex>      lk(ssl_io_mtx);
-                    tls_full_send(ssl, frame.data(), frame.size());
+                    auto                             frame_ptr =
+                        std::make_shared<std::vector<unsigned char>>(frame);
+                    std::lock_guard<std::mutex> lk2(ssl_io_mtx);
+                    if (ssl_stream)
+                    {
+                        async_write_frame(ssl_stream, frame_ptr,
+                                          [frame_ptr](const std::error_code &,
+                                                      std::size_t) {});
+                    }
                 }
             }
         }
@@ -159,11 +261,13 @@ void handle_hello(const Parsed &p, int sock)
     }
 }
 
-void handle_chat(const Parsed &p)
+inline void handle_chat(const Parsed &p)
 {
     const std::string peer_from = trim(p.from);
     const auto        ms        = get_current_timestamp_ms();
 
+    std::cerr << "[" << ms << "] handle_chat: from=" << peer_from
+              << " seq=" << p.seq << " ct_len=" << p.ciphertext.size() << "\n";
     if (!is_valid_username(peer_from)) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
@@ -278,6 +382,9 @@ void handle_chat(const Parsed &p)
                   << " AAD=" << aad_s << "\n";
 
         const auto pt = aead_decrypt(pi.sk.key, p.ciphertext, aad, p.nonce);
+        if (pt.empty())
+            std::cerr << "[" << ms
+                      << "] handle_chat: aead_decrypt returned empty\n";
         if (pt.empty() || pt.size() > 65535) [[unlikely]]
         {
             dev_println("[" + std::to_string(ms) +
@@ -305,7 +412,7 @@ void handle_chat(const Parsed &p)
 
             std::cout << "[" << ts << "] [" << peer_from << " " << shortfp
                       << "] " << msg << "\n";
-            std::cout.flush(); // Force immediate display
+            std::cout.flush();
         }
 
         pi.recv_seq++;
@@ -313,71 +420,9 @@ void handle_chat(const Parsed &p)
     }
     catch (const std::exception &e)
     {
-        std::cout << "[" << ms << "] decrypt failed from=" << peer_from
+        std::cerr << "[" << ms << "] decrypt failed from=" << peer_from
                   << " seq=" << p.seq << " error=" << e.what() << "\n";
     }
-}
-
-// ── get_fingerprint_for_user ── (big simplification & security improvement)
-inline std::string get_fingerprint_for_user(const std::string &username)
-{
-    const auto itset = fps_by_username.find(username);
-    if (itset != fps_by_username.end() && !itset->second.empty())
-    {
-        // Security & performance improvement:
-        // fp_candidate is already the correct hex fingerprint computed once
-        return *itset->second.begin(); // most common case: single valid fp
-    }
-    return "(no fp)";
-}
-
-inline void process_list_response(const Parsed &p)
-{
-    const std::lock_guard<std::mutex> lk(peers_mtx);
-    std::cout << "users:\n";
-
-    for (const auto &u : p.users)
-    {
-        std::string fp_display =
-            (u == my_username && !my_identity_pk.empty())
-                ? fingerprint_to_hex(
-                      fingerprint_sha256(std::vector<unsigned char>(
-                          my_identity_pk.begin(), my_identity_pk.end())))
-                : get_fingerprint_for_user(u);
-
-        std::cout << u << " [" << fp_display << "]\n";
-    }
-}
-
-inline void process_pubkey_response(const Parsed &p)
-{
-    const std::string hexpk =
-        p.identity_pk.empty()
-            ? std::string("(no pk)")
-            : to_hex(p.identity_pk.data(), p.identity_pk.size());
-
-    if (!p.identity_pk.empty())
-    {
-        try
-        {
-            const std::string fhex = compute_fingerprint_hex(p.identity_pk);
-
-            const std::lock_guard<std::mutex> lk(peers_mtx);
-            auto                             &pi = peers[fhex];
-            pi.identity_pk =
-                secure_vector(p.identity_pk.begin(), p.identity_pk.end());
-            if (!p.username.empty())
-            {
-                pi.username = p.username;
-                fps_by_username[p.username].insert(fhex);
-            }
-        }
-        catch (const std::exception &e)
-        {
-            dev_println("fingerprint error: " + std::string(e.what()));
-        }
-    }
-    std::cout << "pubkey " << p.username << " " << hexpk << "\n";
 }
 
 inline std::vector<std::string> find_matching_peers(const std::string &token)
@@ -399,7 +444,6 @@ inline std::vector<std::string> find_matching_peers(const std::string &token)
     return matches;
 }
 
-// Enforce Fingerprint-Only Recipient Resolution
 inline std::vector<std::string>
 resolve_fingerprint_recipients(const std::vector<std::string> &recipients)
 {
@@ -443,19 +487,6 @@ resolve_fingerprint_recipients(const std::vector<std::string> &recipients)
     return resolved;
 }
 
-// Add Session Binding Validation
-[[nodiscard]] inline bool
-validate_session_binding(const std::string &my_fp, const std::string &peer_fp,
-                         const std::string &session_id_a,
-                         const std::string &session_id_b) noexcept
-{
-    if (my_fp.empty() || peer_fp.empty())
-        return false;
-    if (session_id_a.empty() || session_id_b.empty())
-        return false;
-    return session_id_a == session_id_b;
-}
-
 inline std::vector<std::string>
 get_ready_recipients(const std::vector<std::string> &resolved)
 {
@@ -473,16 +504,18 @@ get_ready_recipients(const std::vector<std::string> &resolved)
 }
 
 // "Flawless Victory!"
-inline bool send_message_to_peer(int sock, const std::string &msg,
-                                 const RecipientFP &recipient_fp, SSL *ssl)
-
+inline bool send_message_to_peer(const std::string &msg,
+                                 const RecipientFP &recipient_fp)
 {
-    rotate_ephemeral_if_needed(sock, recipient_fp.value);
+    rotate_ephemeral_if_needed(recipient_fp.value);
 
     const auto ctx = prepare_message_context(recipient_fp.value, my_fp_hex,
                                              peers, peers_mtx);
     if (!ctx.valid)
     {
+        std::cerr << "[" << get_current_timestamp_ms()
+                  << "] send_message_to_peer: context invalid for target="
+                  << recipient_fp.value << "\n";
         return true;
     }
 
@@ -495,17 +528,42 @@ inline bool send_message_to_peer(int sock, const std::string &msg,
             reinterpret_cast<const unsigned char *>(msg.data()), msg.size()),
         std::span<const unsigned char>(ctx.aad.data(), ctx.aad.size()), nonce);
 
-    const auto frame = build_chat(ctx.target_username, my_username,
-                                  compute_fingerprint_array(my_identity_pk),
-                                  ctx.seq, nonce, ct);
+    const auto frame     = build_chat(ctx.target_username, my_username,
+                                      compute_fingerprint_array(my_identity_pk),
+                                      ctx.seq, nonce, ct);
+    auto       frame_ptr = std::make_shared<std::vector<unsigned char>>(frame);
     {
         std::lock_guard<std::mutex> lk(ssl_io_mtx);
-        if (tls_full_send(ssl, frame.data(), frame.size()) <= 0)
+        if (!ssl_stream)
         {
             is_connected = false;
             handle_disconnect(ctx.target_username, recipient_fp.value);
             return false;
         }
+        std::cerr << "[" << get_current_timestamp_ms()
+                  << "] send_message_to_peer: async_write_frame to "
+                  << ctx.target_username << " seq=" << ctx.seq
+                  << " frame_len=" << frame.size() << "\n";
+        async_write_frame(
+            ssl_stream, frame_ptr,
+            [frame_ptr, target = ctx.target_username,
+             fp = recipient_fp.value](const std::error_code &ec, std::size_t)
+            {
+                if (ec)
+                {
+                    std::cerr << "[" << get_current_timestamp_ms()
+                              << "] send_message_to_peer: async_write_frame ec="
+                              << ec.message() << " target=" << target << "\n";
+                    is_connected = false;
+                    handle_disconnect(target, fp);
+                }
+                else
+                {
+                    std::cerr << "[" << get_current_timestamp_ms()
+                              << "] send_message_to_peer: write completed to "
+                              << target << "\n";
+                }
+            });
     }
 
     {
@@ -521,4 +579,5 @@ inline bool send_message_to_peer(int sock, const std::string &msg,
 
     return true;
 }
+
 #endif

@@ -7,162 +7,163 @@
 #include "shared_net_rekey_util.h"
 #include "shared_net_tls_frame_io.h"
 
-#include <algorithm>
 #include <iostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-uint64_t get_current_timestamp_ms() noexcept;
-
-static void broadcast_hello_to_peers(const SessionData &sd, int client_fd,
-                                     const std::vector<unsigned char> &frame,
-                                     const std::vector<ClientState>   &clients)
+static void broadcast_hello_to_peers(
+    const SessionData &sd, std::shared_ptr<ClientState> sender,
+    const std::vector<unsigned char>                   &frame,
+    const std::unordered_map<std::string, SessionData> &sessions)
 {
     auto ts = get_current_timestamp_ms();
-    for (const auto &kv : sd.fd_by_nick)
+    std::cerr << "[" << ts << "] broadcast_hello_to_peers: peers="
+              << sd.clients_by_nick.size()
+              << " sender=" << (sender ? sender->username : "(null)") << "\n";
+
+    for (const auto &kv : sd.clients_by_nick)
     {
-        std::cerr << "[" << ts << "] [SERVER] Checking broadcast to "
-                  << kv.first << " (fd=" << kv.second << ")\\n"; // Debug
-        int dst_fd = kv.second;
-        if (dst_fd == client_fd)
+        if (!sender || kv.second.get() == sender.get())
             continue;
 
-        auto it = std::find_if(clients.begin(), clients.end(),
-                               [dst_fd](const ClientState &cs)
-                               { return cs.fd == dst_fd; });
-        if (it != clients.end())
-        {
-            tls_full_send(it->ssl, frame.data(), frame.size());
-            std::cerr << "[" << ts
-                      << "] [SERVER] Broadcast hello from fd=" << client_fd
-                      << " to fd=" << dst_fd << "\n";
-        }
+        auto frame_copy =
+            std::make_shared<const std::vector<unsigned char>>(frame);
+        async_write_frame(
+            kv.second->stream, frame_copy,
+            [ts, sender_name = sender ? sender->username : "(null)",
+             target_name = kv.first](const std::error_code &ec, std::size_t)
+            {
+                if (ec)
+                {
+                    std::cerr << "[" << ts << "] [SERVER] Broadcast hello -> "
+                              << target_name << " FAILED: " << ec.message()
+                              << "\n";
+                }
+                else
+                {
+                    std::cerr << "[" << ts << "] [SERVER] Broadcast hello from "
+                              << sender_name << " to " << target_name << "\n";
+                }
+            });
     }
 }
 
-inline bool
-handle_hello_message(const ClientState &client_state, const Parsed &p,
+inline void
+handle_hello_message(std::shared_ptr<ClientState> client, const Parsed &p,
                      const std::vector<unsigned char>             &frame,
-                     std::unordered_map<std::string, SessionData> &sessions,
-                     std::unordered_map<int, std::string> &session_by_fd,
-                     std::vector<ClientState>             &clients,
-                     std::vector<int>                     &to_remove)
+                     std::unordered_map<std::string, SessionData> &sessions)
 {
-    int         client_fd = client_state.fd;
+    std::cerr << "[" << get_current_timestamp_ms()
+              << "] handle_hello_message: username='" << p.username
+              << "' session_id='" << p.session_id
+              << "' eph_pk_len=" << p.eph_pk.size() << "\n";
+
     std::string uname;
     std::string sid;
     std::string error = validate_hello_basics(p, uname, sid);
-    std::cerr << "[SERVER] Hello from " << uname << " session=" << sid
-              << " (error: " << error << ")\\n"; // Debug
 
     if (!error.empty())
     {
-        std::cout << "REJECTED: " << error << " for " << uname << "\n";
-        to_remove.push_back(client_fd);
-        return false;
+        std::cerr << "[" << get_current_timestamp_ms()
+                  << "] REJECTED: " << error << " for " << uname << "\n";
+        return;
     }
 
     SessionData &sd = sessions[sid];
 
-    if (!check_username_conflicts(sd, uname, client_fd, to_remove))
-    {
-        return false;
-    }
+    if (!check_username_conflicts(sd, uname, client))
+        return;
 
-    cleanup_old_nickname(sd, client_fd, uname);
+    client->session_id = sid;
+    client->username   = uname;
+    client->fingerprint_hex =
+        p.identity_pk.empty() ? "" : compute_fingerprint_hex(p.identity_pk);
 
-    // register first so broadcast sees this client
-    register_client(sd, client_fd, uname, p, frame);
-    std::cerr << "[SERVER] Registered client fd=" << client_fd
-              << " uname=" << uname << "\\n"; // Debug
+    cleanup_old_nickname(sd, client, uname);
+    register_client(sd, client, uname, p, frame);
 
-    // cache hello by fingerprint
     if (!p.identity_pk.empty())
-    {
-        const std::string fhex = compute_fingerprint_hex(p.identity_pk);
-        sd.hello_message_by_fingerprint[fhex] = frame;
-    }
+        sd.hello_message_by_fingerprint[client->fingerprint_hex] = frame;
 
-    session_by_fd[client_fd] = sid;
-
-    // Test expects: "connect username session=..."
-    std::cout << "connect " << uname << " session=" << sid << "\n";
+    std::cerr << "[" << get_current_timestamp_ms() << "] connect " << uname
+              << " session=" << sid << "\n";
 
     auto ts = get_current_timestamp_ms();
-    // Debug output
     std::cerr << "[" << ts << "] [SERVER] Broadcasting " << uname
-              << "'s hello to " << (sd.fd_by_nick.size() - 1) << " peers\n";
+              << "'s hello to " << (sd.clients_by_nick.size() - 1)
+              << " peers\n";
 
-    broadcast_hello_to_peers(sd, client_fd, frame, clients);
+    broadcast_hello_to_peers(sd, client, frame, sessions);
 
-    // Send existing hellos to new client (core protocol handshake — keep
-    // visible)
     for (const auto &kv : sd.hello_message_by_fingerprint)
     {
         const std::string &existing_fp = kv.first;
-
         if (existing_fp.empty())
             continue;
+
         auto itn = sd.nick_by_fingerprint.find(existing_fp);
         if (itn != sd.nick_by_fingerprint.end() && itn->second == uname)
             continue;
 
-        const auto &existing_hello = kv.second;
+        const auto &existing_hello       = kv.second;
+        uint32_t    existing_payload_len = read_u32_be(existing_hello.data());
+        Parsed      p2 =
+            parse_payload(existing_hello.data() + 4, existing_payload_len);
 
-        try
-        {
-            uint32_t existing_payload_len = read_u32_be(existing_hello.data());
-            Parsed   p2 =
-                parse_payload(existing_hello.data() + 4, existing_payload_len);
+        std::vector<unsigned char> empty_encaps;
+        auto stripped = build_hello(p2.username, ALGO_KYBER512, p2.eph_pk,
+                                    p2.id_alg, p2.identity_pk, p2.signature,
+                                    empty_encaps, p2.session_id);
 
-            // ALWAYS strip encaps when relaying to new clients
-            std::vector<unsigned char> empty_encaps;
-            auto stripped = build_hello(p2.username, ALGO_KYBER512, p2.eph_pk,
-                                        p2.id_alg, p2.identity_pk, p2.signature,
-                                        empty_encaps, p2.session_id);
-            tls_full_send(client_state.ssl, stripped.data(), stripped.size());
-
-            auto ts2 = get_current_timestamp_ms();
-            std::cerr << "[" << ts2 << "] [SERVER] Sent cached hello from "
-                      << p2.username << " to " << uname << " (fp="
-                      << compute_fingerprint_hex(p2.identity_pk).substr(0, 10)
-                      << ")\n";
-        }
-        catch (...)
-        {
-            // tls_full_send(client_state.ssl, existing_hello.data(),
-            // existing_hello.size());
-        }
+        auto frame_copy =
+            std::make_shared<const std::vector<unsigned char>>(stripped);
+        async_write_frame(
+            client->stream, frame_copy,
+            [ts, p2_uname = p2.username, uname,
+             p2_fp = compute_fingerprint_hex(p2.identity_pk)](
+                const std::error_code &ec, std::size_t)
+            {
+                if (ec)
+                {
+                    std::cerr << "[" << ts
+                              << "] [SERVER] Failed to send cached hello from "
+                              << p2_uname << " to " << uname
+                              << " (fp=" << p2_fp.substr(0, 10)
+                              << "): " << ec.message() << "\n";
+                }
+                else
+                {
+                    std::cerr << "[" << ts
+                              << "] [SERVER] Sent cached hello from "
+                              << p2_uname << " to " << uname
+                              << " (fp=" << p2_fp.substr(0, 10) << ")\n";
+                }
+            });
     }
-
-    return true;
 }
 
 inline void
-handle_chat_message(const ClientState &client_state, const Parsed &p,
+handle_chat_message(std::shared_ptr<ClientState> client, const Parsed &p,
                     const std::vector<unsigned char>             &frame,
-                    const std::unordered_map<int, std::string>   &session_by_fd,
-                    std::unordered_map<std::string, SessionData> &sessions,
-                    const std::vector<ClientState>               &clients)
+                    std::unordered_map<std::string, SessionData> &sessions)
 {
-    int  client_fd = client_state.fd;
-    auto sid_it    = session_by_fd.find(client_fd);
-    if (sid_it == session_by_fd.end())
+    std::cerr << "[" << get_current_timestamp_ms()
+              << "] handle_chat_message: from='" << p.from << "' to='" << p.to
+              << "' seq=" << p.seq << "\n";
+
+    if (client->session_id.empty())
         return;
 
-    auto sess_it = sessions.find(sid_it->second);
+    auto sess_it = sessions.find(client->session_id);
     if (sess_it == sessions.end())
         return;
 
-    SessionData &sd = sess_it->second;
+    SessionData                 &sd = sess_it->second;
+    std::shared_ptr<ClientState> dst;
 
-    int dst = -1;
-
-    if (auto it = sd.fd_by_nick.find(p.to); it != sd.fd_by_nick.end())
-    {
+    if (auto it = sd.clients_by_nick.find(p.to); it != sd.clients_by_nick.end())
         dst = it->second;
-    }
     else if (p.to.size() >= 4)
     {
         std::string lower = p.to;
@@ -170,7 +171,7 @@ handle_chat_message(const ClientState &client_state, const Parsed &p,
                                { return static_cast<char>(std::tolower(c)); });
 
         auto it = std::ranges::find_if(
-            sd.fd_by_fingerprint,
+            sd.clients_by_fingerprint,
             [&lower](const auto &kv)
             {
                 const std::string &fp = kv.first;
@@ -182,106 +183,80 @@ handle_chat_message(const ClientState &client_state, const Parsed &p,
                     [](unsigned char a, unsigned char b)
                     { return std::tolower(a) == std::tolower(b); });
             });
-        if (it != sd.fd_by_fingerprint.end())
+        if (it != sd.clients_by_fingerprint.end())
             dst = it->second;
     }
 
-    if (dst != -1)
+    if (dst)
     {
-        auto it =
-            std::find_if(clients.begin(), clients.end(),
-                         [dst](const ClientState &cs) { return cs.fd == dst; });
-        if (it != clients.end())
-        {
-            tls_full_send(it->ssl, frame.data(), frame.size());
-        }
+        auto frame_copy =
+            std::make_shared<const std::vector<unsigned char>>(frame);
+        async_write_frame(
+            dst->stream, frame_copy,
+            [](const std::error_code &ec, std::size_t)
+            {
+                if (ec)
+                    std::cerr
+                        << "[" << get_current_timestamp_ms()
+                        << "] handle_chat_message: async_write_frame failed: "
+                        << ec.message() << "\n";
+            });
     }
 }
 
 inline void
-handle_list_request(const ClientState                            &client_state,
-                    const std::unordered_map<int, std::string>   &session_by_fd,
-                    std::unordered_map<std::string, SessionData> &sessions,
-                    const std::vector<ClientState>               &clients)
+handle_list_request(std::shared_ptr<ClientState>                  client,
+                    std::unordered_map<std::string, SessionData> &sessions)
 {
-    int  client_fd = client_state.fd;
-    auto sid_it    = session_by_fd.find(client_fd);
-    if (sid_it == session_by_fd.end())
+    if (client->session_id.empty())
         return;
-
-    const std::string &sid        = sid_it->second;
-    auto               session_it = sessions.find(sid);
+    auto session_it = sessions.find(client->session_id);
     if (session_it == sessions.end())
         return;
 
     SessionData             &sd = session_it->second;
     std::vector<std::string> users;
-    // Only include clients that are actually connected
-    for (auto &kv : sd.fd_by_nick)
-    {
-        const std::string &nick      = kv.first;
-        int                target_fd = kv.second;
+    for (const auto &kv : sd.clients_by_nick)
+        users.push_back(kv.first);
 
-        // Check if this client is in the connected clients list
-        auto it = std::find_if(clients.begin(), clients.end(),
-                               [target_fd](const ClientState &cs)
-                               { return cs.fd == target_fd; });
-        if (it != clients.end())
+    auto resp      = build_list_response(users);
+    auto resp_copy = std::make_shared<const std::vector<unsigned char>>(resp);
+    async_write_frame(
+        client->stream, resp_copy,
+        [](const std::error_code &ec, std::size_t)
         {
-            users.push_back(nick);
-        }
-    }
-
-    auto resp = build_list_response(users);
-    tls_full_send(client_state.ssl, resp.data(), resp.size());
+            if (ec)
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] handle_list_request: async_write_frame failed: "
+                          << ec.message() << "\n";
+            else
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] handle_list_request: response sent\n";
+        });
 }
 
 inline void
-handle_pubkey_request(const ClientState &client_state, const Parsed &p,
-                      const std::unordered_map<int, std::string> &session_by_fd,
-                      std::unordered_map<std::string, SessionData> &sessions,
-                      const std::vector<ClientState>               &clients)
+handle_pubkey_request(std::shared_ptr<ClientState> client, const Parsed &p,
+                      std::unordered_map<std::string, SessionData> &sessions)
 {
-    int  client_fd = client_state.fd;
-    auto sid_it    = session_by_fd.find(client_fd);
-    if (sid_it == session_by_fd.end())
+    if (client->session_id.empty())
         return;
-
-    const std::string &sid        = sid_it->second;
-    auto               session_it = sessions.find(sid);
+    auto session_it = sessions.find(client->session_id);
     if (session_it == sessions.end())
         return;
 
-    SessionData &sd     = session_it->second;
-    std::string  target = trim(p.username);
-
+    SessionData               &sd     = session_it->second;
+    std::string                target = trim(p.username);
     std::vector<unsigned char> pk;
 
-    auto itn = sd.fd_by_nick.find(target);
-    if (itn != sd.fd_by_nick.end())
+    auto itn = sd.clients_by_nick.find(target);
+    if (itn != sd.clients_by_nick.end() &&
+        !itn->second->fingerprint_hex.empty())
     {
-        int dstfd = itn->second;
-        // Verify this client is still connected
-        bool target_connected = false;
-        for (const auto &client : clients)
-        {
-            if (client.fd == dstfd)
-            {
-                target_connected = true;
-                break;
-            }
-        }
-
-        if (target_connected)
-        {
-            auto itfp = sd.fingerprint_hex_by_fd.find(dstfd);
-            if (itfp != sd.fingerprint_hex_by_fd.end())
-            {
-                auto itpk = sd.identity_pk_by_fingerprint.find(itfp->second);
-                if (itpk != sd.identity_pk_by_fingerprint.end())
-                    pk = itpk->second;
-            }
-        } // <-- ADDED THIS CLOSING BRACE
+        auto itpk =
+            sd.identity_pk_by_fingerprint.find(itn->second->fingerprint_hex);
+        if (itpk != sd.identity_pk_by_fingerprint.end())
+            pk = itpk->second;
     }
     else
     {
@@ -307,33 +282,28 @@ handle_pubkey_request(const ClientState &client_state, const Parsed &p,
         }
         if (matches.size() == 1)
         {
-            // For fingerprint lookup, check if client with this fingerprint is
-            // connected
-            const std::string &matched_fp = matches[0];
-            auto               fd_it = sd.fd_by_fingerprint.find(matched_fp);
-            if (fd_it != sd.fd_by_fingerprint.end())
-            {
-                int dstfd = fd_it->second;
-
-                // Verify this client is still connected
-                bool target_connected = false;
-                for (const auto &client : clients)
-                {
-                    if (client.fd == dstfd)
-                    {
-                        target_connected = true;
-                        break;
-                    }
-                }
-
-                if (target_connected)
-                {
-                    pk = sd.identity_pk_by_fingerprint[matched_fp];
-                }
-            }
+            const std::string matched_fp = matches[0];
+            auto itpk = sd.identity_pk_by_fingerprint.find(matched_fp);
+            if (itpk != sd.identity_pk_by_fingerprint.end())
+                pk = itpk->second;
         }
     }
-    auto resp = build_pubkey_response(target, pk);
-    tls_full_send(client_state.ssl, resp.data(), resp.size());
+
+    auto resp      = build_pubkey_response(target, pk);
+    auto resp_copy = std::make_shared<const std::vector<unsigned char>>(resp);
+    async_write_frame(
+        client->stream, resp_copy,
+        [](const std::error_code &ec, std::size_t)
+        {
+            if (ec)
+                std::cerr
+                    << "[" << get_current_timestamp_ms()
+                    << "] handle_pubkey_request: async_write_frame failed: "
+                    << ec.message() << "\n";
+            else
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] handle_pubkey_request: response sent\n";
+        });
 }
+
 #endif

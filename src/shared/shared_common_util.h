@@ -1,20 +1,18 @@
 #ifndef SHARED_COMMON_UTIL_H
 #define SHARED_COMMON_UTIL_H
 
-
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <ctime>
-#include <iostream>
 #include <vector>
 
 inline std::atomic_bool debug_mode{false};
@@ -120,7 +118,6 @@ inline void write_u32_be(unsigned char *p, uint32_t v)
 {
     write_u32_be(std::span<unsigned char, 4>(p, 4), v);
 }
-
 
 inline std::string trim(std::string s)
 {

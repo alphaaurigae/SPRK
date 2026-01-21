@@ -14,18 +14,9 @@
 #include "server/server_handlers.h"
 #include "server/server_session.h"
 
-#include <algorithm>
-#include <arpa/inet.h>
-#include <cstring>
-#include <fcntl.h>
+#include <asio/io_context.hpp>
 #include <iostream>
-#include <netinet/in.h>
-#include <openssl/err.h>
-#include <openssl/provider.h>
-#include <openssl/ssl.h>
-#include <ranges>
-#include <sys/socket.h>
-#include <unistd.h>
+
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -38,19 +29,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int port = std::stoi(argv[1]);
+    int              port = std::stoi(argv[1]);
+    asio::io_context io;
+    std::error_code  ec;
 
-    const int listen_fd = make_listen_socket(port);
-    if (listen_fd < 0)
-        return 1;
-
-    if (set_socket_nonblocking(listen_fd) < 0)
+    auto acceptor = make_listen_socket_asio(io, port, 16, true, &ec);
+    if (!acceptor)
     {
-        close(listen_fd);
+        std::cerr << "Failed to create acceptor: " << ec.message() << "\n";
         return 1;
     }
 
-    // Initialize TLS context
     auto ctx = init_tls_server_context("sample/sample_test_cert/server.crt",
                                        "sample/sample_test_cert/server.key",
                                        "sample/sample_test_cert/ca.crt");
@@ -59,81 +48,84 @@ int main(int argc, char **argv)
         std::cerr << "TLS server context initialization failed\n";
         return 1;
     }
-
-    SSL *ssl_obj = SSL_new(ctx->native_handle());
-    if (!ssl_obj)
-    {
-        std::cerr << "Failed to create SSL object\n";
-        ctx.reset();
-        return 1;
-    }
-    if (!ctx)
-    {
-        std::cerr << "TLS initialization failed - exiting\n";
-        close(listen_fd);
-        return 1;
-    }
-
-    std::vector<ClientState>                     clients;
     std::unordered_map<std::string, SessionData> sessions;
-    std::unordered_map<int, std::string>         session_by_fd;
 
     std::cout << "Server listening on port " << port
               << " with post-quantum TLS\n";
-
-    asio::io_context    io;
-    RekeyTimeoutManager rtm(io);
-
-    std::thread io_thread([&io] { io.run(); });
-
-    while (true)
+    std::function<void()> accept_loop = [&]()
     {
-        prune_invalid_clients(clients);
+        std::cerr << "[" << get_current_timestamp_ms()
+                  << "] accept_loop: posting async_accept_client\n";
+        async_accept_client(
+            acceptor, ctx,
+            [&sessions, &accept_loop](std::shared_ptr<ssl_socket> stream,
+                                      std::error_code             ec)
+            {
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] accept callback: ec="
+                          << (ec ? ec.message() : "ok")
+                          << " stream=" << (stream ? "yes" : "no") << "\n";
 
-        fd_set rfds;
-        int    maxfd = prepare_select(rfds, listen_fd, clients);
+                if (ec)
+                {
+                    // log and continue accepting
+                    std::cerr << "[" << get_current_timestamp_ms()
+                              << "] accept failed: " << ec.message() << "\n";
+                    accept_loop();
+                    return;
+                }
 
-        timeval tv{0, 200000};
-        int     r = select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
-        if (r < 0)
-        {
-            perror("select");
-            break;
-        }
-        else if (r == 0)
-        {
-            io.poll(); // Process Asio timers/events on timeout
-        }
+                if (!stream)
+                {
+                    std::cerr << "[" << get_current_timestamp_ms()
+                              << "] accept returned null stream\n";
+                    accept_loop();
+                    return;
+                }
 
-        if (FD_ISSET(listen_fd, &rfds))
-        {
-            accept_new_client(listen_fd, clients, ctx);
-        }
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] starting TLS handshake for new client\n";
+                stream->async_handshake(
+                    asio::ssl::stream_base::server,
+                    [stream, &sessions](const std::error_code &ec)
+                    {
+                        std::cerr << "[" << get_current_timestamp_ms()
+                                  << "] handshake callback: ec="
+                                  << (ec ? ec.message() : "ok") << "\n";
+                        if (ec)
+                        {
+                            std::cerr
+                                << "[" << get_current_timestamp_ms()
+                                << "] TLS handshake failed: " << ec.message()
+                                << "\n";
+                            return;
+                        }
 
-        std::vector<int> to_remove;
-        process_client_events(rfds, clients, sessions, session_by_fd,
-                              to_remove);
+                        std::cerr << "[" << get_current_timestamp_ms()
+                                  << "] TLS handshake successful, creating "
+                                     "ClientState\n";
+                        auto client = std::make_shared<ClientState>(stream);
+                        start_client_session(client, sessions);
+                    });
+                accept_loop();
+            });
+    };
 
-        for (int fd : to_remove)
-        {
-            cleanup_disconnected_client(fd, clients, session_by_fd, sessions);
-        }
+    accept_loop();
+    asio::executor_work_guard<asio::io_context::executor_type> work_guard(
+        io.get_executor());
+    std::vector<std::thread> io_threads;
+    for (unsigned i = 0; i < std::thread::hardware_concurrency(); ++i)
+    {
+        io_threads.emplace_back([&io] { io.run(); });
     }
 
-    clients.clear();
-    if (ssl_obj)
+    work_guard.reset();
+    for (auto &t : io_threads)
     {
-        if (SSL_is_init_finished(ssl_obj))
-            SSL_shutdown(ssl_obj);
-        SSL_free(ssl_obj);
-        ssl_obj = nullptr;
+        if (t.joinable())
+            t.join();
     }
 
-    io.stop();
-    if (io_thread.joinable())
-        io_thread.join();
-    ctx.reset();
-    close(listen_fd);
-    return 0;
     return 0;
 }

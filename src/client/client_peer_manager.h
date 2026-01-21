@@ -1,7 +1,6 @@
 #ifndef CLIENT_PEER_MANAGER_H
 #define CLIENT_PEER_MANAGER_H
 
-
 #include "shared_common_crypto.h"
 #include "shared_common_util.h"
 #include "shared_net_rekey_util.h"
@@ -71,12 +70,20 @@ void update_peer_info(PeerInfo &pi, const std::string &peer_name,
     {
         fps_set.insert(peer_fp_hex);
         pi.peer_fp_hex = peer_fp_hex;
+        std::cerr << "[" << get_current_timestamp_ms()
+                  << "] update_peer_info: set peer '" << peer_name << "' fp="
+                  << peer_fp_hex.substr(
+                         0, std::min<size_t>(peer_fp_hex.size(), 12))
+                  << "\n";
     }
     else
     {
         const std::string peer_key = "uname:" + peer_name;
         fps_set.insert(peer_key);
         pi.peer_fp_hex = peer_key;
+        std::cerr << "[" << get_current_timestamp_ms()
+                  << "] update_peer_info: set peer '" << peer_name
+                  << "' uname-key=" << peer_key << "\n";
     }
 }
 

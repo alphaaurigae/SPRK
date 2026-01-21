@@ -13,14 +13,17 @@
 
 #include <functional>
 #include <memory>
-#include <optional>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <optional>
 #include <string>
 #include <variant>
 
-namespace asio { class io_context; }
+namespace asio
+{
+class io_context;
+}
 
 struct PQKeypair
 {

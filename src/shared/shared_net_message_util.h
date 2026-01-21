@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-template<typename T> struct PeerMap;
+template <typename T> struct PeerMap;
 
 struct MessageContext
 {

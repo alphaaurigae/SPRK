@@ -8,187 +8,147 @@
 #include "shared_net_rekey_util.h"
 #include "shared_net_tls_frame_io.h"
 
-#include <algorithm>
+#include <asio/ssl.hpp>
 #include <iostream>
-#include <sys/select.h>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
-
-
-static int prepare_select(fd_set &rfds, int listen_fd,
-                          const std::vector<ClientState> &clients)
-{
-    FD_ZERO(&rfds);
-    FD_SET(listen_fd, &rfds);
-    int maxfd = listen_fd;
-
-    for (const auto &cs : clients)
-    {
-        FD_SET(cs.fd, &rfds);
-        if (cs.fd > maxfd)
-            maxfd = cs.fd;
-    }
-
-    return maxfd;
-}
-
 inline void cleanup_disconnected_client(
-    int client_fd, std::vector<ClientState> &clients,
-    std::unordered_map<int, std::string>         &session_by_fd,
+    std::shared_ptr<ClientState>                  client,
     std::unordered_map<std::string, SessionData> &sessions)
 {
-    auto sid_it = session_by_fd.find(client_fd);
-    if (sid_it == session_by_fd.end())
-    {
-        auto it = std::find_if(clients.begin(), clients.end(),
-                               [client_fd](const ClientState &cs)
-                               { return cs.fd == client_fd; });
-        if (it != clients.end())
-            clients.erase(it);
+    if (client->session_id.empty())
         return;
-    }
 
-    std::string sid        = sid_it->second;
-    auto        session_it = sessions.find(sid);
+    auto session_it = sessions.find(client->session_id);
     if (session_it == sessions.end())
-    {
-        session_by_fd.erase(client_fd);
-        auto it = std::find_if(clients.begin(), clients.end(),
-                               [client_fd](const ClientState &cs)
-                               { return cs.fd == client_fd; });
-        if (it != clients.end())
-            clients.erase(it);
+
         return;
-    }
 
     SessionData &sd = session_it->second;
 
-    std::string nick;
-    auto        nit = sd.nick_by_fd.find(client_fd);
-    if (nit != sd.nick_by_fd.end())
-        nick = nit->second;
-
-    std::string fp_hex;
-    auto        iit = sd.fingerprint_hex_by_fd.find(client_fd);
-    if (iit != sd.fingerprint_hex_by_fd.end())
-        fp_hex = iit->second;
-
-    // ADD LOGGING HERE (replace the old simple "disconnect" line)
     auto ts = get_current_timestamp_ms();
-    if (!nick.empty())
+    if (!client->username.empty())
     {
-        std::cout << "[" << ts << "] DISCONNECT " << nick << " session=" << sid
-                  << (fp_hex.empty() ? ""
-                                     : " fingerprint=" + fp_hex.substr(0, 10))
+        std::cout << "[" << ts << "] DISCONNECT " << client->username
+                  << " session=" << client->session_id
+                  << (client->fingerprint_hex.empty()
+                          ? ""
+                          : " fingerprint=" +
+                                client->fingerprint_hex.substr(0, 10))
                   << "\n";
     }
     else
     {
-        std::cout << "[" << ts << "] DISCONNECT fd=" << client_fd
-                  << " session=" << sid << "\n";
+        std::cout << "[" << ts << "] DISCONNECT session=" << client->session_id
+                  << "\n";
     }
 
-    if (!fp_hex.empty())
+    if (!client->fingerprint_hex.empty())
     {
-        sd.fd_by_fingerprint.erase(fp_hex);
-        sd.nick_by_fingerprint.erase(fp_hex);
-        sd.eph_by_fingerprint.erase(fp_hex);
-        sd.identity_pk_by_fingerprint.erase(fp_hex);
-        sd.hello_message_by_fingerprint.erase(fp_hex);
-        sd.fingerprint_hex_by_fd.erase(client_fd);
+        sd.clients_by_fingerprint.erase(client->fingerprint_hex);
+        sd.nick_by_fingerprint.erase(client->fingerprint_hex);
+        sd.eph_by_fingerprint.erase(client->fingerprint_hex);
+        sd.identity_pk_by_fingerprint.erase(client->fingerprint_hex);
+        sd.hello_message_by_fingerprint.erase(client->fingerprint_hex);
     }
 
-    if (!nick.empty())
+    if (!client->username.empty())
     {
-        sd.fd_by_nick.erase(nick);
-        sd.nick_by_fd.erase(client_fd);
-    }
-
-    session_by_fd.erase(client_fd);
-
-    auto it = std::find_if(clients.begin(), clients.end(),
-                           [client_fd](const ClientState &cs)
-                           { return cs.fd == client_fd; });
-    if (it != clients.end())
-    {
-        // REMOVE this old logging line since we added better logging above
-        // std::cout << "disconnect " << nick << " session=" << sid << "\n";
-        clients.erase(it);
+        sd.clients_by_nick.erase(client->username);
     }
 }
 
-static void
-process_client_events(const fd_set &rfds, std::vector<ClientState> &clients,
-                      std::unordered_map<std::string, SessionData> &sessions,
-                      std::unordered_map<int, std::string> &session_by_fd,
-                      std::vector<int>                     &to_remove)
+inline void
+start_client_session(std::shared_ptr<ClientState>                  client,
+                     std::unordered_map<std::string, SessionData> &sessions)
 {
-    for (auto &client : clients)
-    {
-        if (!FD_ISSET(client.fd, &rfds))
-            continue;
-
-        if (!SSL_is_init_finished(client.ssl))
+    std::cerr << "[" << get_current_timestamp_ms()
+              << "] start_client_session: registering read chain for client\n";
+    chain_read_frames(
+        client->stream,
+        [client, &sessions](const std::error_code      &ec,
+                            std::vector<unsigned char> &frame)
         {
-            int ret = SSL_accept(client.ssl);
-            if (ret <= 0)
+            std::cerr << "[" << get_current_timestamp_ms()
+                      << "] chain_read_frames callback: ec="
+                      << (ec ? ec.message() : "ok")
+                      << " frame_len=" << frame.size() << "\n";
+
+            if (ec)
             {
-                int err = SSL_get_error(client.ssl, ret);
-                if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] read error - cleaning up client\n";
+                cleanup_disconnected_client(client, sessions);
+                return;
+            }
+
+            if (frame.size() < 4)
+            {
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] frame too small (<4) - cleaning up client\n";
+                cleanup_disconnected_client(client, sessions);
+                return;
+            }
+
+            uint32_t payload_len = read_u32_be(frame.data());
+            if (payload_len + 4 != frame.size())
+            {
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] warning: payload_len mismatch; payload_len="
+                          << payload_len << " frame_total=" << frame.size()
+                          << "\n";
+            }
+
+            try
+            {
+                Parsed p = parse_payload(frame.data() + 4, payload_len);
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] parsed message type="
+                          << static_cast<int>(p.type) << " from='" << p.username
+                          << "' session_id='" << p.session_id << "'\n";
+
+                switch (p.type)
                 {
-                    to_remove.push_back(client.fd);
+                case MsgType::MSG_HELLO:
+                    std::cerr << "[" << get_current_timestamp_ms()
+                              << "] dispatch: MSG_HELLO\n";
+                    handle_hello_message(client, p, frame, sessions);
+                    break;
+                case MsgType::MSG_CHAT:
+                    std::cerr << "[" << get_current_timestamp_ms()
+                              << "] dispatch: MSG_CHAT to=" << p.to << "\n";
+                    handle_chat_message(client, p, frame, sessions);
+                    break;
+                case MSG_LIST_REQUEST:
+                    std::cerr << "[" << get_current_timestamp_ms()
+                              << "] dispatch: MSG_LIST_REQUEST\n";
+                    handle_list_request(client, sessions);
+                    break;
+                case MSG_PUBKEY_REQUEST:
+                    std::cerr << "[" << get_current_timestamp_ms()
+                              << "] dispatch: MSG_PUBKEY_REQUEST username="
+                              << p.username << "\n";
+                    handle_pubkey_request(client, p, sessions);
+                    break;
+                default:
+                    std::cerr << "[" << get_current_timestamp_ms()
+                              << "] unknown message type: "
+                              << static_cast<int>(p.type) << "\n";
+                    break;
                 }
             }
-            continue;
-        }
-
-        std::vector<unsigned char> frame;
-        if (!tls_peek_and_read_frame(client.ssl, frame))
-        {
-            int err = SSL_get_error(client.ssl, 0);
-            if (err == SSL_ERROR_ZERO_RETURN || err == SSL_ERROR_SYSCALL)
+            catch (const std::exception &e)
             {
-                to_remove.push_back(client.fd);
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] parse_payload threw: " << e.what() << "\n";
             }
-            continue;
-        }
-
-        uint32_t payload_len = read_u32_be(frame.data());
-        try
-        {
-            Parsed p = parse_payload(frame.data() + 4, payload_len);
-            switch (p.type)
+            catch (...)
             {
-            case MsgType::MSG_HELLO:
-                handle_hello_message(client, p, frame, sessions, session_by_fd,
-                                     clients, to_remove);
-                break;
-            case MsgType::MSG_CHAT:
-                handle_chat_message(client, p, frame, session_by_fd, sessions,
-                                    clients);
-                break;
-            case MSG_LIST_REQUEST:
-                handle_list_request(client, session_by_fd, sessions, clients);
-                break;
-            case MSG_PUBKEY_REQUEST:
-                handle_pubkey_request(client, p, session_by_fd, sessions,
-                                      clients);
-                break;
-            default:
-                break;
+                std::cerr << "[" << get_current_timestamp_ms()
+                          << "] parse_payload unknown exception\n";
             }
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "server parse exception: " << e.what() << "\n";
-            to_remove.push_back(client.fd);
-        }
-        catch (...)
-        {
-            std::cerr << "server parse exception: unknown\n";
-            to_remove.push_back(client.fd);
-        }
-    }
+        });
 }
 #endif

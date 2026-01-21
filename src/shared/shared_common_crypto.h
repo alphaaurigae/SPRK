@@ -21,8 +21,8 @@
 
 #ifdef USE_LIBOQS
 #include <oqs/oqs.h>
-//struct OQS_KEM;
-//struct OQS_SIG;
+// struct OQS_KEM;
+// struct OQS_SIG;
 #endif
 
 inline constexpr std::size_t KEY_LEN     = 32;

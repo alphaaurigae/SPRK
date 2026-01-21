@@ -7,10 +7,8 @@
 #include "shared_net_username_util.h"
 
 #include <mutex>
-#include <openssl/ssl.h>
 #include <vector>
 
-// Strong type to prevent swapping msg and recipient_fp
 struct RecipientFP
 {
     std::string value;
@@ -19,14 +17,12 @@ struct RecipientFP
     [[nodiscard]] std::string      &&str()      &&{ return std::move(value); }
 };
 
-// Forward declarations from client_runtime.h and client_peer_disconnect.h
-extern std::mutex ssl_io_mtx;
-extern std::atomic_bool is_connected;
-extern std::atomic_bool should_reconnect;
+extern std::mutex                  ssl_io_mtx;
+extern std::shared_ptr<ssl_socket> ssl_stream;
+extern std::atomic_bool            is_connected;
+extern std::atomic_bool            should_reconnect;
 void handle_disconnect(const std::string &username, const std::string &fp_hex);
 
-
-// Recipient parsing
 inline std::vector<std::string> parse_recipient_list(const std::string &input)
 {
     std::vector<std::string> recipients;
@@ -49,9 +45,7 @@ inline std::vector<std::string> parse_recipient_list(const std::string &input)
     return recipients;
 }
 
-// Returns true if the line was a command that was fully handled
-inline bool handle_client_command(const std::string   &line,
-                                  [[maybe_unused]] int sock, SSL *ssl)
+inline bool handle_client_command(const std::string &line)
 {
     if (line == "help")
     {
@@ -73,16 +67,27 @@ inline bool handle_client_command(const std::string   &line,
     {
         const std::vector<unsigned char> p{PROTO_VERSION, MSG_LIST_REQUEST};
         const auto                       f = build_frame(p);
+
+        auto frame_ptr = std::make_shared<std::vector<unsigned char>>(f);
+
         {
             std::lock_guard<std::mutex> lk(ssl_io_mtx);
-            if (tls_full_send(ssl, f.data(), f.size()) <= 0)
+            if (!ssl_stream)
             {
                 is_connected = false;
-                handle_disconnect(
-                    "", ""); // list request fails, we may not know peer yet
+                handle_disconnect("", "");
+                return true;
             }
-        }
-        {
+            async_write_frame(
+                ssl_stream, frame_ptr,
+                [frame_ptr](const std::error_code &ec, std::size_t)
+                {
+                    if (ec)
+                    {
+                        is_connected = false;
+                        handle_disconnect("", "");
+                    }
+                });
         }
         return true;
     }
@@ -96,18 +101,29 @@ inline bool handle_client_command(const std::string   &line,
             return true;
         }
         const auto req = build_pubkey_request(who);
+        auto frame_ptr = std::make_shared<std::vector<unsigned char>>(req);
+
         {
             std::lock_guard<std::mutex> lk(ssl_io_mtx);
-            if (tls_full_send(ssl, req.data(), req.size()) <= 0)
+            if (!ssl_stream)
             {
                 is_connected = false;
-                handle_disconnect(
-                    who, ""); // pubk request fails, clean any partial state
+                handle_disconnect(who, "");
+                return true;
             }
+            async_write_frame(
+                ssl_stream, frame_ptr,
+                [frame_ptr, who](const std::error_code &ec, std::size_t)
+                {
+                    if (ec)
+                    {
+                        is_connected = false;
+                        handle_disconnect(who, "");
+                    }
+                });
         }
         return true;
     }
-
     return false;
 }
 

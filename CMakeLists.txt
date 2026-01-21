@@ -80,7 +80,7 @@ set(CMAKE_CXX_COMPILER ${CXX_COMPILER})
 
 # Compiler flags main -----------------------------------------------------------------------------------------------------------------------
 if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type (Debug, Release, RelWithDebInfo, MinSizeRel)" FORCE)
+    set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Build type (Debug, Release, RelWithDebInfo, MinSizeRel)" FORCE)
 endif()
 
 
@@ -93,6 +93,7 @@ set(COMPILER_FLAGS_MINSIZEREL "-Os")
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CXX_FLAGS "${COMPILER_FLAGS_BASE} ${COMPILER_FLAGS_DEBUG}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -v")
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CMAKE_CXX_FLAGS "${COMPILER_FLAGS_BASE} ${COMPILER_FLAGS_RELEASE}")
 elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
@@ -290,10 +291,10 @@ find_package(OpenSSL 3.5 REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
 
 set(LIBS_MAIN
-  ssl
-  crypto
-  ${OQS_LIB}
-  pthread
+ssl
+crypto
+${OQS_LIB}
+pthread
 PocoData
 PocoJSON
 PocoXML

@@ -11,107 +11,218 @@
 #include "shared_net_tls_frame_io.h"
 
 #include <atomic>
-#include <cerrno>
-#include <cstring>
+
 #include <iostream>
 #include <mutex>
-#include <openssl/ssl.h>
-#include <poll.h>
+
 #include <string>
 #include <thread>
-#include <unistd.h>
 
-
-// Forward declarations
-void handle_hello(const Parsed &p, int sock);
-void handle_chat(const Parsed &p);
-void process_list_response(const Parsed &p);
-void process_pubkey_response(const Parsed &p);
+void                     handle_hello(const Parsed &p);
+void                     handle_chat(const Parsed &p);
+void                     process_list_response(const Parsed &p);
+void                     process_pubkey_response(const Parsed &p);
 std::vector<std::string> parse_recipient_list(const std::string &input);
-std::vector<std::string> resolve_fingerprint_recipients(const std::vector<std::string> &recipients);
-std::vector<std::string> get_ready_recipients(const std::vector<std::string> &resolved);
-bool send_message_to_peer(int sock, const std::string &msg, const RecipientFP &recipient_fp, SSL *ssl);
+std::vector<std::string>
+resolve_fingerprint_recipients(const std::vector<std::string> &recipients);
+std::vector<std::string>
+     get_ready_recipients(const std::vector<std::string> &resolved);
+bool send_message_to_peer(const std::string &msg,
+                          const RecipientFP &recipient_fp);
 
-inline void reader_thread(int sock, SSL *ssl)
+extern std::shared_ptr<ssl_socket> ssl_stream;
+
+inline void asio_reader_loop()
 {
-    while (should_reconnect && is_connected)
+    auto frame_buf = std::make_shared<std::vector<unsigned char>>();
+
+    auto read_next = std::make_shared<std::function<void()>>();
+    *read_next     = [frame_buf, read_next]()
     {
-        std::vector<unsigned char> frame;
-        if (!tls_peek_and_read_frame(ssl, frame))
+        if (!is_connected.load())
         {
+            std::cerr << "[DEBUG] asio_reader_loop: not connected, returning\n";
+            return;
+        }
+
+        std::shared_ptr<ssl_socket> s;
+        {
+            std::lock_guard<std::mutex> lk(ssl_io_mtx);
+            s = ssl_stream;
+        }
+
+        if (!s)
+        {
+            std::cerr << "[DEBUG] asio_reader_loop: ssl_stream null\n";
             is_connected = false;
-            handle_disconnect("(unknown)", ""); // reader thread TLS read failed
-            break;
+            handle_disconnect("(unknown)", "");
+            return;
         }
 
-        try
-        {
-            std::span<const unsigned char> span(frame);
-            const Parsed                   p =
-                parse_payload(span.subspan(4).data(), span.size() - 4);
-
-            switch (p.type)
+        std::cerr << "[DEBUG] asio_reader_loop: posting async_read_frame\n";
+        async_read_frame(
+            s, frame_buf,
+            [frame_buf, read_next](const std::error_code &ec, std::size_t)
             {
-            case MSG_HELLO:
-                handle_hello(p, sock);
-                break;
-            case MSG_CHAT:
-                handle_chat(p);
-                break;
-            case MSG_LIST_RESPONSE:
-                process_list_response(p);
-                break;
-            case MSG_PUBKEY_RESPONSE:
-                process_pubkey_response(p);
-                break;
-            default:
-                std::cout << "unknown message type: "
-                          << static_cast<int>(p.type) << "\n";
-            }
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "parse error: " << e.what() << "\n";
-        }
-    }
+                if (ec)
+                {
+                    is_connected = false;
+                    handle_disconnect("(unknown)", "");
+                    return;
+                }
+
+                try
+                {
+                    std::span<const unsigned char> span(*frame_buf);
+                    Parsed                         p =
+                        parse_payload(span.subspan(4).data(), span.size() - 4);
+                    std::cerr
+                        << "[DEBUG] asio_reader_loop: received message type="
+                        << int(p.type) << "\n";
+
+                    switch (p.type)
+                    {
+                    case MSG_HELLO:
+                        std::cerr << "[DEBUG] handling MSG_HELLO from "
+                                  << p.username << "\n";
+                        handle_hello(p);
+                        break;
+                    case MSG_CHAT:
+                        std::cerr << "[DEBUG] handling MSG_CHAT from " << p.from
+                                  << "\n";
+                        handle_chat(p);
+                        break;
+                    case MSG_LIST_RESPONSE:
+                        std::cerr << "[DEBUG] handling MSG_LIST_RESPONSE\n";
+                        process_list_response(p);
+                        break;
+                    case MSG_PUBKEY_RESPONSE:
+                        std::cerr << "[DEBUG] handling MSG_PUBKEY_RESPONSE\n";
+                        process_pubkey_response(p);
+                        break;
+                    default:
+                        std::cerr << "[DEBUG] unknown message type "
+                                  << int(p.type) << "\n";
+                        break;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    std::cerr << "[ERROR] asio_reader_loop: parse exception: "
+                              << e.what() << "\n";
+                }
+                catch (...)
+                {
+                    std::cerr << "[ERROR] asio_reader_loop: unknown parse "
+                                 "exception\n";
+                }
+
+                (*read_next)();
+            });
+    };
+
+    std::cerr << "[DEBUG] asio_reader_loop: starting read loop\n";
+    (*read_next)();
 }
 
+/* asio_reader_loop() handles everything:
+inline void reader_thread()
+{
+    auto frame_buf = std::make_shared<std::vector<unsigned char>>();
+
+    std::function<void()> read_next_frame = [&read_next_frame, frame_buf]()
+    {
+        if (!should_reconnect || !is_connected)
+        {
+            std::cerr << "[DEBUG] reader_thread: not reconnecting or
+disconnected\n"; return;
+        }
+
+        std::shared_ptr<ssl_socket> stream_copy;
+        {
+            std::lock_guard<std::mutex> lk(ssl_io_mtx);
+            stream_copy = ssl_stream;
+        }
+
+        if (!stream_copy)
+        {
+            std::cerr << "[DEBUG] reader_thread: ssl_stream null\n";
+            is_connected = false;
+            handle_disconnect("(unknown)", "");
+            return;
+        }
+
+        std::cerr << "[DEBUG] reader_thread: posting async_read_frame\n";
+        async_read_frame(
+            stream_copy, frame_buf,
+            [frame_buf, read_next_frame](const std::error_code &ec, std::size_t)
+            {
+
+                if (ec)
+                {
+                    is_connected = false;
+                    handle_disconnect("(unknown)", "");
+                    return;
+                }
+
+                try
+                {
+                    std::span<const unsigned char> span(*frame_buf);
+                    const Parsed                   p =
+                        parse_payload(span.subspan(4).data(), span.size() - 4);
+
+                    std::cerr << "[DEBUG] reader_thread: received type=" <<
+int(p.type) << "\n"; switch (p.type)
+                    {
+                    case MSG_HELLO:
+                        handle_hello(p);
+                        break;
+                    case MSG_CHAT:
+                        handle_chat(p);
+                        break;
+                    case MSG_LIST_RESPONSE:
+                        process_list_response(p);
+                        break;
+                    case MSG_PUBKEY_RESPONSE:
+                        process_pubkey_response(p);
+                        break;
+                    default:
+                        std::cerr << "[DEBUG] reader_thread: unknown message
+type=" << int(p.type) << "\n";
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    std::cerr << "[ERROR] reader_thread: parse exception: " <<
+e.what() << "\n";
+                }
+                catch (...)
+                {
+                    std::cerr << "[ERROR] reader_thread: unknown parse
+exception\n";
+                }
+
+                read_next_frame();
+            });
+    };
+
+    std::cerr << "[DEBUG] reader_thread: starting read loop\n";
+    read_next_frame();
+
+    while (should_reconnect && is_connected)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+*/
+
 // "I am the fire to your ice.", "I do what I must to return home."
-inline void writer_thread(int sock, SSL *ssl)
+inline void writer_thread()
 {
     std::string line;
 
     while (is_connected.load(std::memory_order_acquire))
     {
-        // Non-blocking poll on stdin with yield to allow reader output
-        struct pollfd pfd;
-        pfd.fd     = STDIN_FILENO;
-        pfd.events = POLLIN;
-
-        const int poll_result = poll(&pfd, 1, 50); // 50ms timeout (shorter)
-
-        if (poll_result < 0)
-        {
-            if (errno == EINTR)
-                continue;
-            std::cerr << "[" << get_current_timestamp_ms()
-                      << "] poll error: " << strerror(errno) << "\n";
-            break;
-        }
-
-        if (poll_result == 0)
-        {
-            // No input available, yield to allow reader thread to display
-            // messages
-            std::this_thread::yield();
-            continue;
-        }
-
-        // Check if POLLIN event is actually set (not just timeout/error)
-        if (!(pfd.revents & POLLIN))
-        {
-            continue;
-        }
 
         // Input available, read it
         if (!std::getline(std::cin, line))
@@ -142,7 +253,7 @@ inline void writer_thread(int sock, SSL *ssl)
         if (!is_connected.load(std::memory_order_acquire))
             break;
 
-        if (handle_client_command(line, sock, ssl))
+        if (handle_client_command(line))
             continue;
 
         const auto pos = line.find(' ');
@@ -165,6 +276,9 @@ inline void writer_thread(int sock, SSL *ssl)
         const auto resolved   = resolve_fingerprint_recipients(recipients);
         const auto ready      = get_ready_recipients(resolved);
 
+        std::cerr << "[DEBUG] writer_thread: ready recipients count="
+                  << ready.size() << "\n";
+
         if (ready.empty())
         {
             std::cout << "peer not ready\n";
@@ -173,17 +287,11 @@ inline void writer_thread(int sock, SSL *ssl)
 
         for (const auto &r : ready)
         {
-            if (!send_message_to_peer(sock, msg, RecipientFP{r}, ssl))
+            std::cerr << "[DEBUG] writer_thread: sending to " << r << "\n";
+            if (!send_message_to_peer(msg, RecipientFP{r}))
             {
-                int err = SSL_get_error(ssl, 0);
-                if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ)
-                    continue;
-
-                std::cerr << "[" << get_current_timestamp_ms()
-                          << "] send failed (err=" << err
-                          << ") - peer/server likely dropped connection\n";
-
-                is_connected.store(false, std::memory_order_release);
+                std::cerr << "[DEBUG] writer_thread: failed to send to " << r
+                          << "\n";
                 break;
             }
         }

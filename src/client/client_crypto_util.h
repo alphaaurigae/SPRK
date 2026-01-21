@@ -11,9 +11,7 @@
 #include <cstdint>
 #include <iostream>
 #include <mutex>
-#include <openssl/err.h>
-#include <openssl/provider.h>
-#include <string>
+
 #include <string>
 
 #ifdef USE_LIBOQS
@@ -24,43 +22,21 @@ struct PeerInfo;
 
 // Forward declarations for globals from client_peer_manager.h
 extern std::unordered_map<std::string, PeerInfo> peers;
-extern std::mutex peers_mtx;
-extern secure_vector my_eph_pk;
-extern secure_vector my_eph_sk;
-extern secure_vector my_identity_pk;
-extern secure_vector my_identity_sk;
-extern std::string my_username;
-extern std::string my_fp_hex;
-extern std::string session_id;
-extern std::mutex ssl_io_mtx;
-extern SSL *ssl;
+extern std::mutex                                peers_mtx;
+extern secure_vector                             my_eph_pk;
+extern secure_vector                             my_eph_sk;
+extern secure_vector                             my_identity_pk;
+extern secure_vector                             my_identity_sk;
+extern std::string                               my_username;
+extern std::string                               my_fp_hex;
+extern std::string                               session_id;
+extern std::mutex                                ssl_io_mtx;
+extern std::shared_ptr<ssl_socket>               ssl_stream;
 
-inline bool init_oqs_provider()
-
-{
-    static OSSL_PROVIDER *oqsprov = nullptr;
-    if (!oqsprov)
-    {
-        oqsprov = OSSL_PROVIDER_load(nullptr, "oqsprovider");
-        if (!oqsprov)
-        {
-            std::cerr << "Failed to load oqsprovider\n";
-            ERR_print_errors_fp(stderr);
-            return false;
-        }
-    }
-    return true;
-}
-
-struct KeyPath;
-
-struct AlgorithmName;
-
-static void rotate_ephemeral_if_needed([[maybe_unused]] int sock,
-                                       const std::string   &peer_fp)
+static void rotate_ephemeral_if_needed(const std::string &peer_fp)
 {
     const std::lock_guard<std::mutex> lk(peers_mtx);
-    const auto it = peers.find(peer_fp);
+    const auto                        it = peers.find(peer_fp);
     if (it == peers.end() || !should_rekey(it->second.send_seq, REKEY_INTERVAL))
         return;
 
@@ -84,9 +60,14 @@ static void rotate_ephemeral_if_needed([[maybe_unused]] int sock,
         my_username, ALGO_KEM_ALG_NAME,
         std::vector<unsigned char>(new_pk.begin(), new_pk.end()), ALGO_MLDSA87,
         identity_pk_vec, signature_vec, empty_encaps, session_id);
-    tls_full_send(ssl, hello_frame.data(), hello_frame.size());
+    auto frame_ptr = std::make_shared<std::vector<unsigned char>>(hello_frame);
     {
         const std::lock_guard<std::mutex> lk(peers_mtx);
+        if (!ssl_stream)
+            return;
+        async_write_frame(ssl_stream, frame_ptr,
+                          [frame_ptr](const std::error_code &, std::size_t) {});
+
         my_eph_pk     = new_pk;
         my_eph_sk     = new_sk;
         const auto it = peers.find(peer_fp);
@@ -168,10 +149,9 @@ static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
 }
 
 static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
-                                        const std::string   &key_context,
-                                        [[maybe_unused]] int sock,
-                                        const std::string   &peer_name,
-                                        int64_t              ms)
+                                        const std::string &key_context,
+                                        const std::string &peer_name,
+                                        int64_t            ms)
 {
     try
     {
@@ -227,9 +207,15 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
             std::vector<unsigned char>(my_eph_pk.begin(), my_eph_pk.end()),
             ALGO_MLDSA87, identity_pk_vec, signature_vec, encaps_ct,
             p.session_id);
+
+        auto frame_ptr = std::make_shared<std::vector<unsigned char>>(reply);
         {
             std::lock_guard<std::mutex> lk(ssl_io_mtx);
-            tls_full_send(ssl, reply.data(), reply.size());
+            if (!ssl_stream)
+                return false;
+            async_write_frame(
+                ssl_stream, frame_ptr,
+                [frame_ptr](const std::error_code &, std::size_t) {});
         }
         pi.sent_hello = true;
         return true;
@@ -359,7 +345,7 @@ bool handle_initiator_no_encaps(PeerInfo &pi, const Parsed &p,
                     ", awaiting encaps");
         return false;
     }
-    return try_handle_initiator_encaps(pi, p, key_context, sock, peer_name,
+    return try_handle_initiator_encaps(pi, p, key_context, peer_name,
                                        static_cast<int64_t>(ms));
 }
 

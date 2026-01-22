@@ -1,5 +1,5 @@
-#ifndef CLIENT_CMDLINE_H
-#define CLIENT_CMDLINE_H
+#ifndef CLIENT_CMDLINE_UTIL_H
+#define CLIENT_CMDLINE_UTIL_H
 
 #include "shared_common_util.h"
 #include "shared_net_username_util.h"
@@ -10,11 +10,11 @@
 
 struct ConnectionConfig
 {
-    std::string server;
+    std::string server{};
     int         port{};
-    std::string username;
-    std::string client_cert_path;
-    std::string client_key_path;
+    std::string username{};
+    std::string client_cert_path{};
+    std::string client_key_path{};
 };
 
 inline ConnectionConfig parse_command_line_args(std::span<char *> args)

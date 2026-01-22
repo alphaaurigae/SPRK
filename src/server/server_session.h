@@ -28,8 +28,8 @@ struct SessionData
 };
 
 // Returns empty string on success, error message on failure
-static std::string validate_hello_basics(const Parsed &p, std::string &uname,
-                                         std::string &sid)
+static std::string validate_hello_basics(const Parsed &p, std::string &sid,
+                                         std::string &uname)
 {
     uname = trim(p.username);
     sid   = trim(p.session_id);
@@ -127,10 +127,11 @@ static bool check_username_conflicts(SessionData &sd, const std::string &uname,
     return true; // username is acceptable
 }
 
-static void register_client(SessionData                 &sd,
-                            std::shared_ptr<ClientState> client,
-                            const std::string &uname, const Parsed &p,
-                            const std::vector<unsigned char> &frame)
+static void register_client(SessionData                      &sd,
+                            std::shared_ptr<ClientState>      client,
+                            const std::string                &uname,
+                            const std::vector<unsigned char> &frame,
+                            const Parsed                     &p)
 {
     std::cerr << "[" << get_current_timestamp_ms()
               << "] register_client: uname='" << uname

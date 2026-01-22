@@ -6,21 +6,33 @@
 #include "shared_net_tls_frame_io.h"
 #include "shared_net_username_util.h"
 
+#include <atomic>
+#include <memory>
 #include <mutex>
 #include <vector>
 
 struct RecipientFP
 {
     std::string value;
-    explicit RecipientFP(std::string fp) : value(std::move(fp)) {}
+    explicit RecipientFP(std::string fp) noexcept : value(std::move(fp)) {}
     [[nodiscard]] const std::string &str() const & { return value; }
     [[nodiscard]] std::string      &&str()      &&{ return std::move(value); }
 };
+
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wglobal-constructors"
+#endif
 
 extern std::mutex                  ssl_io_mtx;
 extern std::shared_ptr<ssl_socket> ssl_stream;
 extern std::atomic_bool            is_connected;
 extern std::atomic_bool            should_reconnect;
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
 void handle_disconnect(const std::string &username, const std::string &fp_hex);
 
 inline std::vector<std::string> parse_recipient_list(const std::string &input)

@@ -15,12 +15,12 @@ struct Parsed;
 
 struct PeerInfo
 {
-    std::string   username;
-    std::string   bound_session_id;
-    secure_vector eph_pk;
-    secure_vector identity_pk;
-    std::string   peer_fp_hex;
-    SessionKey    sk;
+    std::string   username{};
+    std::string   bound_session_id{};
+    secure_vector eph_pk{};
+    secure_vector identity_pk{};
+    std::string   peer_fp_hex{};
+    SessionKey    sk{};
     uint32_t      recv_seq                = 0;
     uint32_t      send_seq                = 0;
     uint64_t      last_recv_time          = 0;

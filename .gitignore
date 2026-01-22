@@ -4,6 +4,13 @@ bin/
 src_old*
 .cache/
 
+# TEST
+codeql
+codeql_report
+.codeql_db
+codeql.sh
+quick_spawn_test.sh
+
 # CMake files
 CMakeFiles/
 CMakeCache.txt

@@ -29,7 +29,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int              port = std::stoi(argv[1]);
+    const int        port = std::stoi(argv[1]);
     asio::io_context io;
     std::error_code  ec;
 

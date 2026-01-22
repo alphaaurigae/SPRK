@@ -10,7 +10,7 @@ BIN2_NAME='client / client.sh'
 configure() {
 	print_status "Create build directories and config cmake"
 	mkdir -p ${BUILD_DIR}
-	cmake -S . -B ${BUILD_DIR} --fresh -DCMAKE_VERBOSE_MAKEFILE=ON 
+	cmake -S . -B ${BUILD_DIR} --fresh -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 }
 
 build() {

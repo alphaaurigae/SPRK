@@ -14,8 +14,8 @@
 
 static void broadcast_hello_to_peers(
     const SessionData &sd, std::shared_ptr<ClientState> sender,
-    const std::vector<unsigned char>                   &frame,
-    const std::unordered_map<std::string, SessionData> &sessions)
+    const std::vector<unsigned char> &frame,
+    const std::unordered_map<std::string, SessionData> & /*sessions*/)
 {
     auto ts = get_current_timestamp_ms();
     std::cerr << "[" << ts << "] broadcast_hello_to_peers: peers="
@@ -61,7 +61,7 @@ handle_hello_message(std::shared_ptr<ClientState> client, const Parsed &p,
 
     std::string uname;
     std::string sid;
-    std::string error = validate_hello_basics(p, uname, sid);
+    std::string error = validate_hello_basics(p, sid, uname);
 
     if (!error.empty())
     {
@@ -81,7 +81,7 @@ handle_hello_message(std::shared_ptr<ClientState> client, const Parsed &p,
         p.identity_pk.empty() ? "" : compute_fingerprint_hex(p.identity_pk);
 
     cleanup_old_nickname(sd, client, uname);
-    register_client(sd, client, uname, p, frame);
+    register_client(sd, client, uname, frame, p);
 
     if (!p.identity_pk.empty())
         sd.hello_message_by_fingerprint[client->fingerprint_hex] = frame;

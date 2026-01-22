@@ -16,7 +16,8 @@ struct ClientState
     std::string                 username;
     std::string                 fingerprint_hex;
 
-    explicit ClientState(std::shared_ptr<ssl_socket> s) : stream(std::move(s))
+    explicit ClientState(std::shared_ptr<ssl_socket> s)
+        : stream(std::move(s)), session_id{}, username{}, fingerprint_hex{}
     {
     }
 };

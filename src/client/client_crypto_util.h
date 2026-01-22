@@ -1,3 +1,4 @@
+// client_crypto_util.h
 #ifndef CLIENT_CRYPTO_UTIL_H
 #define CLIENT_CRYPTO_UTIL_H
 
@@ -19,20 +20,7 @@
 #endif
 
 struct PeerInfo;
-/*
-// Forward declarations for globals from client_peer_manager.h
-extern std::unordered_map<std::string, PeerInfo> peers;
-extern std::mutex                                peers_mtx;
-extern secure_vector                             my_eph_pk;
-extern secure_vector                             my_eph_sk;
-extern secure_vector                             my_identity_pk;
-extern secure_vector                             my_identity_sk;
-extern std::string                               my_username;
-extern std::string                               my_fp_hex;
-extern std::string                               session_id;
-extern std::mutex                                ssl_io_mtx;
-extern std::shared_ptr<ssl_socket>               ssl_stream;
-*/
+
 static void rotate_ephemeral_if_needed(const std::string &peer_fp)
 {
     const std::lock_guard<std::mutex> lk(peers_mtx);
@@ -81,8 +69,6 @@ static void rotate_ephemeral_if_needed(const std::string &peer_fp)
     dev_println("[" + std::to_string(ms) +
                 "] rotated ephemeral key for peer_fp " + peer_fp);
 }
-
-// AAD Context Construction
 
 struct KeyContextParams
 {
@@ -136,7 +122,6 @@ static std::string build_key_context_for_peer(const KeyContextParams &ctx)
     return a + "|" + b + "|" + ctx.session_id;
 }
 
-// Strong-typedef style small wrappers to avoid "easily-swappable-parameters"
 struct PeerNameView
 {
     std::string_view v{};
@@ -155,16 +140,22 @@ struct KeyContextView
     explicit KeyContextView(std::string_view s) noexcept : v(s) {}
 };
 
-struct MsU
-{
-    uint64_t v{};
-    explicit MsU(uint64_t x) noexcept : v(x) {}
-};
-
 struct MsS
 {
     int64_t v{};
     explicit MsS(int64_t x) noexcept : v(x) {}
+};
+
+struct ExpectedPkLen
+{
+    size_t v{};
+    explicit ExpectedPkLen(size_t x) noexcept : v(x) {}
+};
+
+struct ExpectedCtLen
+{
+    size_t v{};
+    explicit ExpectedCtLen(size_t x) noexcept : v(x) {}
 };
 
 static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
@@ -203,7 +194,6 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
 {
     try
     {
-        // Recompute locally (safe and simple – no need to pass extra param)
         std::string peer_fp_hex =
             fingerprint_to_hex(fingerprint_sha256(std::vector<unsigned char>(
                 pi.identity_pk.begin(), pi.identity_pk.end())));
@@ -214,7 +204,6 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
                     " initiator=" + std::to_string(initiator) +
                     " already_sent=" + std::to_string(pi.sent_hello));
 
-        // Fixed: proper function call syntax (no stray ... and no extra comma)
         const auto enc_pair = pqkem_encaps(
             KEM_ALG_NAME,
             std::vector<unsigned char>(pi.eph_pk.begin(), pi.eph_pk.end()));
@@ -277,7 +266,7 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
     }
 }
 
-bool validate_username(MsU ms, PeerNameView peer_name)
+bool validate_username(PeerNameView peer_name, MsU ms)
 {
     if (!is_valid_username(peer_name.v))
     {
@@ -291,7 +280,6 @@ bool validate_username(MsU ms, PeerNameView peer_name)
                     "] REJECTED: self-connection attempt");
         return false;
     }
-    // Prevent Self-Session Exploits
     if (std::string(peer_name.v) == my_username)
     {
         dev_println("[" + std::to_string(ms.v) +
@@ -301,8 +289,7 @@ bool validate_username(MsU ms, PeerNameView peer_name)
     return true;
 }
 
-// --- Fixed helper functions (compatible with original handle_hello) ---
-bool check_peer_limits(MsU ms, PeerKeyView peer_key)
+bool check_peer_limits(PeerKeyView peer_key, MsU ms)
 {
     if (peers.size() >= MAX_PEERS &&
         peers.find(std::string(peer_key.v)) == peers.end())
@@ -342,8 +329,8 @@ inline bool check_hello_signature(const Parsed &p, TimestampMs ms,
     return sig_ok;
 }
 
-bool check_rate_and_signature(PeerInfo &pi, const Parsed &p, MsU ms,
-                              PeerNameView peer_name)
+bool check_rate_and_signature(PeerInfo &pi, const Parsed &p,
+                              PeerNameView peer_name, MsU ms)
 {
     if (!check_rate_limit(pi))
     {
@@ -385,24 +372,24 @@ bool get_expected_lengths(ExpectedLengths &lengths, uint64_t ms)
     return true;
 }
 
-bool validate_eph_pk_length(const Parsed &p, MsU ms, PeerNameView peer_name,
-                            size_t expected_pk_len)
+bool validate_eph_pk_length(const Parsed &p, PeerNameView peer_name,
+                            ExpectedPkLen expected_pk_len, MsU ms)
 {
-    if (p.eph_pk.size() != expected_pk_len)
+    if (p.eph_pk.size() != expected_pk_len.v)
     {
         dev_println("[" + std::to_string(ms.v) +
                     "] REJECTED: bad eph_pk length from " +
                     std::string(peer_name.v));
     }
-    return p.eph_pk.size() == expected_pk_len;
+    return p.eph_pk.size() == expected_pk_len.v;
 }
 
-bool handle_encaps_present(PeerInfo &pi, const Parsed &p, MsU ms,
+bool handle_encaps_present(PeerInfo &pi, const Parsed &p,
                            PeerNameView peer_name, KeyContextView key_context,
-                           size_t expected_ct_len)
+                           ExpectedCtLen expected_ct_len, MsU ms)
 {
 
-    if (p.encaps.size() != expected_ct_len)
+    if (p.encaps.size() != expected_ct_len.v)
     {
         dev_println("[" + std::to_string(ms.v) +
                     "] REJECTED: bad encaps length from " +
@@ -413,13 +400,13 @@ bool handle_encaps_present(PeerInfo &pi, const Parsed &p, MsU ms,
                                            MsS{static_cast<int64_t>(ms.v)});
 }
 
-bool handle_initiator_no_encaps(PeerInfo &pi, const Parsed &p, MsU ms,
+bool handle_initiator_no_encaps(PeerInfo &pi, const Parsed &p,
                                 PeerNameView   peer_name,
                                 KeyContextView key_context,
-                                size_t         expected_pk_len)
+                                ExpectedPkLen expected_pk_len, MsU ms)
 {
 
-    if (pi.eph_pk.size() != expected_pk_len)
+    if (pi.eph_pk.size() != expected_pk_len.v)
     {
         dev_println("[" + std::to_string(ms.v) +
                     "] INFO: missing peer eph_pk for " +
@@ -430,11 +417,12 @@ bool handle_initiator_no_encaps(PeerInfo &pi, const Parsed &p, MsU ms,
                                        MsS{static_cast<int64_t>(ms.v)});
 }
 
-void log_awaiting_encaps(MsU ms, PeerNameView peer_name)
+void log_awaiting_encaps(PeerNameView peer_name, MsU ms)
 {
     std::cout << "[" << ms.v << "] INFO: awaiting encaps from "
               << std::string(peer_name.v) << "\n";
 }
+
 void log_ready_if_new(const PeerInfo &pi, uint64_t ms, bool was_ready,
                       const std::string &peer_name)
 {

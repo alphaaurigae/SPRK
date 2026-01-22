@@ -32,6 +32,24 @@ struct PeerInfo
     bool          identity_verified       = false;
 };
 
+struct MsU
+{
+    uint64_t v{};
+    explicit MsU(uint64_t x) noexcept : v(x) {}
+};
+
+struct PeerNameStr
+{
+    std::string_view v{};
+    explicit PeerNameStr(std::string_view s) noexcept : v(s) {}
+};
+
+struct PeerFpHexStr
+{
+    std::string_view v{};
+    explicit PeerFpHexStr(std::string_view s) noexcept : v(s) {}
+};
+
 static constexpr uint32_t REKEY_INTERVAL       = 1024;
 static constexpr size_t   MAX_PEERS            = 256;
 static constexpr uint32_t RATE_LIMIT_MSGS      = 100;
@@ -61,29 +79,31 @@ static bool check_rate_limit(PeerInfo &pi) noexcept
     return allowed;
 }
 
-void update_peer_info(PeerInfo &pi, const std::string &peer_name,
-                      const std::string               &peer_fp_hex,
+void update_peer_info(PeerInfo &pi, PeerNameStr peer_name,
+                      PeerFpHexStr                     peer_fp_hex,
                       std::unordered_set<std::string> &fps_set)
 {
-    pi.username = peer_name;
-    if (!peer_fp_hex.empty())
+    pi.username = std::string(peer_name.v);
+    if (!peer_fp_hex.v.empty())
     {
-        fps_set.insert(peer_fp_hex);
-        pi.peer_fp_hex = peer_fp_hex;
+        fps_set.insert(std::string(peer_fp_hex.v));
+        pi.peer_fp_hex = std::string(peer_fp_hex.v);
         std::cerr << "[" << get_current_timestamp_ms()
-                  << "] update_peer_info: set peer '" << peer_name << "' fp="
-                  << peer_fp_hex.substr(
-                         0, std::min<size_t>(peer_fp_hex.size(), 12))
+                  << "] update_peer_info: set peer '"
+                  << std::string(peer_name.v) << "' fp="
+                  << std::string(peer_fp_hex.v)
+                         .substr(0, std::min<size_t>(peer_fp_hex.v.size(), 12))
                   << "\n";
     }
     else
     {
-        const std::string peer_key = "uname:" + peer_name;
+        const std::string peer_key = "uname:" + std::string(peer_name.v);
         fps_set.insert(peer_key);
         pi.peer_fp_hex = peer_key;
         std::cerr << "[" << get_current_timestamp_ms()
-                  << "] update_peer_info: set peer '" << peer_name
-                  << "' uname-key=" << peer_key << "\n";
+                  << "] update_peer_info: set peer '"
+                  << std::string(peer_name.v) << "' uname-key=" << peer_key
+                  << "\n";
     }
 }
 
@@ -98,7 +118,7 @@ bool detect_key_changes(const PeerInfo &pi, const Parsed &p, bool &pk_changed,
     return !had_eph_pk || pk_changed || has_new_encaps;
 }
 
-void handle_rekey(PeerInfo &pi, const std::string &peer_name, uint64_t ms)
+void handle_rekey(PeerInfo &pi, PeerNameStr peer_name, MsU ms)
 {
     pi.recv_seq   = 0;
     pi.send_seq   = 0;
@@ -106,16 +126,17 @@ void handle_rekey(PeerInfo &pi, const std::string &peer_name, uint64_t ms)
     pi.sent_hello = false;
     pi.sk.key.clear();
     pi.identity_verified = false;
-    std::cout << "[" << ms << "] peer " << peer_name << " rekeyed\n";
+    std::cout << "[" << ms.v << "] peer " << std::string(peer_name.v)
+              << " rekeyed\n";
 }
 
 void update_keys_and_log_connect(PeerInfo &pi, const Parsed &p,
-                                 const std::string &peer_name, uint64_t ms)
+                                 PeerNameStr peer_name, MsU ms)
 {
     pi.eph_pk      = secure_vector(p.eph_pk.begin(), p.eph_pk.end());
     pi.identity_pk = secure_vector(p.identity_pk.begin(), p.identity_pk.end());
 
-    const std::string ts      = format_hhmmss(ms);
+    const std::string ts      = format_hhmmss(ms.v);
     std::string       shortpk = "(no pk)";
     if (!p.identity_pk.empty())
     {
@@ -125,8 +146,8 @@ void update_keys_and_log_connect(PeerInfo &pi, const Parsed &p,
                                             hexpk.substr(hexpk.size() - 10)
                                       : hexpk;
     }
-    std::cout << "[" << ts << "] connect " << peer_name << " pubkey=" << shortpk
-              << "\n";
+    std::cout << "[" << ts << "] connect " << std::string(peer_name.v)
+              << " pubkey=" << shortpk << "\n";
 }
 
 #endif

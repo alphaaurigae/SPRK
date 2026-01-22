@@ -142,9 +142,9 @@ try
         }
 
         connection_complete = false;
-        attempt_connection_async(io, config.server, config.port,
-                                 persisted_eph_pk, persisted_eph_sk,
-                                 have_persisted_eph,
+        attempt_connection_async(io, ServerStr{config.server},
+                                 PortInt{config.port}, persisted_eph_pk,
+                                 persisted_eph_sk, have_persisted_eph,
                                  [&connection_complete](bool success)
                                  {
                                      if (success)

@@ -55,7 +55,7 @@ inline void asio_reader_loop()
         {
             std::cerr << "[DEBUG] asio_reader_loop: ssl_stream null\n";
             is_connected = false;
-            handle_disconnect("(unknown)", "");
+            handle_disconnect(UsernameView{"(unknown)"}, FpHexView{""});
             return;
         }
 
@@ -67,7 +67,7 @@ inline void asio_reader_loop()
                 if (ec)
                 {
                     is_connected = false;
-                    handle_disconnect("(unknown)", "");
+                    handle_disconnect(UsernameView{"(unknown)"}, FpHexView{""});
                     return;
                 }
 

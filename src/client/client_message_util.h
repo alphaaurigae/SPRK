@@ -2,6 +2,7 @@
 #define CLIENT_MESSAGE_UTIL_H
 
 #include "client_crypto_util.h"
+#include "client_peer_disconnect.h"
 #include "client_peer_manager.h"
 #include "shared_common_crypto.h"
 #include "shared_common_util.h"
@@ -31,23 +32,21 @@ extern std::mutex                  ssl_io_mtx;
 extern std::shared_ptr<ssl_socket> ssl_stream;
 extern std::atomic_bool            is_connected;
 
-void handle_disconnect(const std::string &username, const std::string &fp_hex);
-
-bool validate_username(MsU ms, PeerNameView peer_name);
-bool check_peer_limits(MsU ms, PeerKeyView peer_key);
-bool check_rate_and_signature(PeerInfo &pi, const Parsed &p, MsU ms,
-                              PeerNameView peer_name);
+bool validate_username(PeerNameView peer_name, MsU ms);
+bool check_peer_limits(PeerKeyView peer_key, MsU ms);
+bool check_rate_and_signature(PeerInfo &pi, const Parsed &p,
+                              PeerNameView peer_name, MsU ms);
 struct ExpectedLengths;
 
-bool validate_eph_pk_length(const Parsed &p, MsU ms, PeerNameView peer_name,
-                            size_t expected_pk_len);
-bool handle_encaps_present(PeerInfo &pi, const Parsed &p, MsU ms,
-                           PeerNameView peer_name, KeyContextView key_context,
-                           size_t expected_ct_len);
-bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
-                                 PeerNameView   peer_name,
-                                 KeyContextView key_context, MsS ms);
-void log_awaiting_encaps(MsU ms, PeerNameView peer_name);
+bool        validate_eph_pk_length(const Parsed &p, PeerNameView peer_name,
+                                   ExpectedPkLen expected_pk_len, MsU ms);
+bool        handle_encaps_present(PeerInfo &pi, const Parsed &p,
+                                  PeerNameView peer_name, KeyContextView key_context,
+                                  ExpectedCtLen expected_ct_len, MsU ms);
+bool        try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
+                                        PeerNameView   peer_name,
+                                        KeyContextView key_context, MsS ms);
+void        log_awaiting_encaps(PeerNameView peer_name, MsU ms);
 std::string build_key_context_for_peer(const std::string &my_fp,
                                        const std::string &peer_fp_hex_ref,
                                        const std::string &session_id_val);
@@ -131,7 +130,7 @@ inline void handle_hello(const Parsed &p)
               << " encaps_len=" << p.encaps.size() << "\n";
 
     const auto ms = get_current_timestamp_ms();
-    if (!validate_username(MsU{ms}, PeerNameView{peer_name}))
+    if (!validate_username(PeerNameView{peer_name}, MsU{ms}))
         return;
 
     const std::lock_guard<std::mutex> lk(peers_mtx);
@@ -152,11 +151,12 @@ inline void handle_hello(const Parsed &p)
 
     auto &pi      = peers[peer_key];
     auto &fps_set = fps_by_username[peer_name];
-    update_peer_info(pi, peer_name, peer_fp_hex, fps_set);
+    update_peer_info(pi, PeerNameStr{peer_name}, PeerFpHexStr{peer_fp_hex},
+                     fps_set);
 
-    if (!check_peer_limits(MsU{ms}, PeerKeyView{peer_key}))
+    if (!check_peer_limits(PeerKeyView{peer_key}, MsU{ms}))
         return;
-    if (!check_rate_and_signature(pi, p, MsU{ms}, PeerNameView{peer_name}))
+    if (!check_rate_and_signature(pi, p, PeerNameView{peer_name}, MsU{ms}))
         return;
 
     bool       pk_changed     = false;
@@ -165,19 +165,19 @@ inline void handle_hello(const Parsed &p)
         detect_key_changes(pi, p, pk_changed, has_new_encaps);
 
     if (pk_changed)
-        handle_rekey(pi, peer_name, ms);
+        handle_rekey(pi, PeerNameStr{peer_name}, MsU{ms});
 
     if (!needs_key_handling && pi.ready)
         return;
 
-    update_keys_and_log_connect(pi, p, peer_name, ms);
+    update_keys_and_log_connect(pi, p, PeerNameStr{peer_name}, MsU{ms});
 
     ExpectedLengths expected{};
     if (!get_expected_lengths(expected, ms))
         return;
 
-    if (!validate_eph_pk_length(p, MsU{ms}, PeerNameView{peer_name},
-                                expected.pk_len))
+    if (!validate_eph_pk_length(p, PeerNameView{peer_name},
+                                ExpectedPkLen{expected.pk_len}, MsU{ms}))
         return;
 
     const std::string key_context = build_key_context_for_peer(
@@ -192,8 +192,9 @@ inline void handle_hello(const Parsed &p)
     if (!p.encaps.empty())
     {
 
-        if (handle_encaps_present(pi, p, MsU{ms}, PeerNameView{peer_name},
-                                  KeyContextView{key_context}, expected.ct_len))
+        if (handle_encaps_present(pi, p, PeerNameView{peer_name},
+                                  KeyContextView{key_context},
+                                  ExpectedCtLen{expected.ct_len}, MsU{ms}))
         {
             if (!was_ready && pi.ready)
             {
@@ -231,9 +232,9 @@ inline void handle_hello(const Parsed &p)
     {
         if (!p.encaps.empty())
         {
-            if (handle_encaps_present(pi, p, MsU{ms}, PeerNameView{peer_name},
+            if (handle_encaps_present(pi, p, PeerNameView{peer_name},
                                       KeyContextView{key_context},
-                                      expected.ct_len))
+                                      ExpectedCtLen{expected.ct_len}, MsU{ms}))
             {
                 if (!was_ready && pi.ready)
                 {
@@ -261,12 +262,12 @@ inline void handle_hello(const Parsed &p)
         }
         else
         {
-            log_awaiting_encaps(MsU{ms}, PeerNameView{peer_name});
+            log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
         }
     }
     else
     {
-        log_awaiting_encaps(MsU{ms}, PeerNameView{peer_name});
+        log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
     }
 }
 
@@ -277,7 +278,7 @@ inline void handle_chat(const Parsed &p)
 
     std::cerr << "[" << ms << "] handle_chat: from=" << peer_from
               << " seq=" << p.seq << " ct_len=" << p.ciphertext.size() << "\n";
-    if (!validate_username(MsU{ms}, PeerNameView{peer_from})) [[unlikely]]
+    if (!validate_username(PeerNameView{peer_from}, MsU{ms})) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms) +
                     "] REJECTED: invalid sender username");
@@ -376,14 +377,8 @@ inline void handle_chat(const Parsed &p)
             sender_fp_hex = fingerprint_to_hex(fp);
         }
 
-        // Decrypt: AAD must use same sorted order as encryption defined in
-        // shared_common_crypto.h struct AADBuilder
         const std::string aad_s =
-            AADBuilder{
-                my_fp_hex,    // me (receiver) - local_fp
-                sender_fp_hex // sender (peer) - remote_fp
-            }
-                .build_for_seq(p.seq);
+            AADBuilder{my_fp_hex, sender_fp_hex}.build_for_seq(p.seq);
 
         std::vector<unsigned char> aad(aad_s.begin(), aad_s.end());
 
@@ -512,7 +507,6 @@ get_ready_recipients(const std::vector<std::string> &resolved)
     return ready;
 }
 
-// "Flawless Victory!"
 inline bool send_message_to_peer(const std::string &msg,
                                  const RecipientFP &recipient_fp)
 {
@@ -546,7 +540,8 @@ inline bool send_message_to_peer(const std::string &msg,
         if (!ssl_stream)
         {
             is_connected = false;
-            handle_disconnect(ctx.target_username, recipient_fp.value);
+            handle_disconnect(UsernameView{ctx.target_username},
+                              FpHexView{recipient_fp.value});
             return false;
         }
         std::cerr << "[" << get_current_timestamp_ms()
@@ -564,7 +559,7 @@ inline bool send_message_to_peer(const std::string &msg,
                               << "] send_message_to_peer: async_write_frame ec="
                               << ec.message() << " target=" << target << "\n";
                     is_connected = false;
-                    handle_disconnect(target, fp);
+                    handle_disconnect(UsernameView{target}, FpHexView{fp});
                 }
                 else
                 {

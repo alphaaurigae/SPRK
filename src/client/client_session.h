@@ -26,6 +26,18 @@ extern std::shared_ptr<ssl_socket> ssl_stream;
 
 void asio_reader_loop();
 
+struct ServerStr
+{
+    std::string_view v{};
+    explicit ServerStr(std::string_view s) noexcept : v(s) {}
+};
+
+struct PortInt
+{
+    int v{};
+    explicit PortInt(int x) noexcept : v(x) {}
+};
+
 inline bool setup_session_id(std::span<char *> args)
 {
     std::string_view session_flag = "--sessionid";
@@ -53,12 +65,13 @@ inline bool setup_session_id(std::span<char *> args)
 }
 
 inline void attempt_connection_async(
-    asio::io_context &io, const std::string &server, int port,
+    asio::io_context &io, ServerStr server, PortInt port,
     secure_vector &persisted_eph_pk, secure_vector &persisted_eph_sk,
     bool &have_persisted_eph, std::function<void(bool)> completion_handler)
 {
     std::cout << "[" << get_current_timestamp_ms()
-              << "] attempting connection to " << server << ":" << port << "\n";
+              << "] attempting connection to " << std::string(server.v) << ":"
+              << port.v << "\n";
 
     if (!have_persisted_eph)
     {
@@ -72,9 +85,9 @@ inline void attempt_connection_async(
     my_eph_sk = persisted_eph_sk;
 
     async_connect_to_host_asio(
-        io, server.c_str(), port,
-        [&io, completion_handler](std::shared_ptr<asio::ip::tcp::socket> sock,
-                                  std::error_code                        ec)
+        io, std::string(server.v).c_str(), port.v,
+        [completion_handler](std::shared_ptr<asio::ip::tcp::socket> sock,
+                             std::error_code                        ec)
         {
             if (ec)
             {

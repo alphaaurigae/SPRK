@@ -6,6 +6,8 @@
 #include "shared_net_tls_frame_io.h"
 #include "shared_net_username_util.h"
 
+#include "client_peer_disconnect.h"
+
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -32,8 +34,6 @@ extern std::atomic_bool            should_reconnect;
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
-
-void handle_disconnect(const std::string &username, const std::string &fp_hex);
 
 inline std::vector<std::string> parse_recipient_list(const std::string &input)
 {
@@ -87,7 +87,7 @@ inline bool handle_client_command(const std::string &line)
             if (!ssl_stream)
             {
                 is_connected = false;
-                handle_disconnect("", "");
+                handle_disconnect(UsernameView{""}, FpHexView{""});
                 return true;
             }
             async_write_frame(
@@ -97,7 +97,7 @@ inline bool handle_client_command(const std::string &line)
                     if (ec)
                     {
                         is_connected = false;
-                        handle_disconnect("", "");
+                        handle_disconnect(UsernameView{""}, FpHexView{""});
                     }
                 });
         }
@@ -120,7 +120,7 @@ inline bool handle_client_command(const std::string &line)
             if (!ssl_stream)
             {
                 is_connected = false;
-                handle_disconnect(who, "");
+                handle_disconnect(UsernameView{who}, FpHexView{""});
                 return true;
             }
             async_write_frame(
@@ -130,7 +130,7 @@ inline bool handle_client_command(const std::string &line)
                     if (ec)
                     {
                         is_connected = false;
-                        handle_disconnect(who, "");
+                        handle_disconnect(UsernameView{who}, FpHexView{""});
                     }
                 });
         }

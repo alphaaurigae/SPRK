@@ -15,7 +15,8 @@
 #include <string_view>
 #include <vector>
 
-namespace shared_util {
+namespace shared_util
+{
 inline std::atomic_bool debug_mode{false};
 }
 

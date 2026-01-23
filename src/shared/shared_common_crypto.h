@@ -856,5 +856,4 @@ compute_fingerprint_array(std::span<const unsigned char> pk)
     return fingerprint_sha256(pk);
 }
 
-
 #endif

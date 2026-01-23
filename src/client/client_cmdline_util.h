@@ -34,10 +34,10 @@ inline ConnectionConfig parse_command_line_args(std::span<char *> args)
 
     for (std::size_t i = 1; i < args.size(); ++i)
     {
-if (std::string_view(args[i]) == "--debug")
-{
-    shared_util::debug_mode = true;
-}
+        if (std::string_view(args[i]) == "--debug")
+        {
+            shared_util::debug_mode = true;
+        }
     }
 
     ConnectionConfig config;

@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-struct Parsed;
+struct PeerParsed;
 
 struct PeerInfo
 {

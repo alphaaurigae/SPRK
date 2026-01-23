@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <Poco/Buffer.h>
 
 constexpr uint8_t PROTO_VERSION = 1;
 constexpr size_t  MAX_USERNAME  = 64;
@@ -164,7 +165,7 @@ read_bytes_u16(std::span<const unsigned char> payload, size_t &idx,
 } // namespace proto_detail
 
 inline std::vector<unsigned char>
-build_frame(const std::vector<unsigned char> &payload)
+build_frame(std::span<const unsigned char> payload)
 {
     const auto                 L = static_cast<uint32_t>(payload.size());
     std::vector<unsigned char> frame(4 + payload.size());
@@ -180,7 +181,7 @@ build_hello(const std::string &username, uint8_t eph_alg,
             const std::vector<unsigned char> &identity_pk,
             const std::vector<unsigned char> &signature,
             const std::vector<unsigned char> &encaps,
-            const std::string                &session_id)
+            const std::string &session_id)
 {
     if (username.empty() || username.size() > MAX_USERNAME)
         throw std::runtime_error("bad username");
@@ -195,40 +196,44 @@ build_hello(const std::string &username, uint8_t eph_alg,
     if (encaps.size() > 65535)
         throw std::runtime_error("bad encaps len");
 
-    std::vector<unsigned char> p;
-    p.reserve(2 + 1 + username.size() + 1 + 2 + eph_pk.size() + 1 + 2 +
-              identity_pk.size() + 2 + signature.size() + 2 + encaps.size() +
-              SESSION_ID_LEN);
-    p.push_back(PROTO_VERSION);
-    p.push_back(MSG_HELLO);
-    p.push_back(static_cast<unsigned char>(username.size()));
-    p.insert(p.end(), username.begin(), username.end());
-
-    p.push_back(eph_alg);
     const auto eph_len = static_cast<uint16_t>(eph_pk.size());
-    p.push_back(static_cast<unsigned char>((eph_len >> 8) & 0xFFU));
-    p.push_back(static_cast<unsigned char>(eph_len & 0xFFU));
-    p.insert(p.end(), eph_pk.begin(), eph_pk.end());
-
-    p.push_back(id_alg);
-    const auto id_len = static_cast<uint16_t>(identity_pk.size());
-    p.push_back(static_cast<unsigned char>((id_len >> 8) & 0xFFU));
-    p.push_back(static_cast<unsigned char>(id_len & 0xFFU));
-    p.insert(p.end(), identity_pk.begin(), identity_pk.end());
-
+    const auto id_len  = static_cast<uint16_t>(identity_pk.size());
     const auto sig_len = static_cast<uint16_t>(signature.size());
-    p.push_back(static_cast<unsigned char>((sig_len >> 8) & 0xFFU));
-    p.push_back(static_cast<unsigned char>(sig_len & 0xFFU));
-    p.insert(p.end(), signature.begin(), signature.end());
-
     const auto enc_len = static_cast<uint16_t>(encaps.size());
-    p.push_back(static_cast<unsigned char>((enc_len >> 8) & 0xFFU));
-    p.push_back(static_cast<unsigned char>(enc_len & 0xFFU));
-    if (enc_len != 0U)
-        p.insert(p.end(), encaps.begin(), encaps.end());
 
-    p.insert(p.end(), session_id.begin(), session_id.end());
-    return build_frame(p);
+    const size_t total_size = 2 + 1 + username.size() + 1 + 2 + eph_len +
+                              1 + 2 + id_len + 2 + sig_len + 2 + enc_len +
+                              SESSION_ID_LEN;
+
+    Poco::Buffer<unsigned char> buf(total_size);
+    auto it = buf.begin();
+
+    *it++ = PROTO_VERSION;
+    *it++ = MSG_HELLO;
+    *it++ = static_cast<unsigned char>(username.size());
+    it = std::copy(username.begin(), username.end(), it);
+
+    *it++ = eph_alg;
+    *it++ = static_cast<unsigned char>((eph_len >> 8) & 0xFFU);
+    *it++ = static_cast<unsigned char>(eph_len & 0xFFU);
+    it = std::copy(eph_pk.begin(), eph_pk.end(), it);
+
+    *it++ = id_alg;
+    *it++ = static_cast<unsigned char>((id_len >> 8) & 0xFFU);
+    *it++ = static_cast<unsigned char>(id_len & 0xFFU);
+    it = std::copy(identity_pk.begin(), identity_pk.end(), it);
+
+    *it++ = static_cast<unsigned char>((sig_len >> 8) & 0xFFU);
+    *it++ = static_cast<unsigned char>(sig_len & 0xFFU);
+    it = std::copy(signature.begin(), signature.end(), it);
+
+    *it++ = static_cast<unsigned char>((enc_len >> 8) & 0xFFU);
+    *it++ = static_cast<unsigned char>(enc_len & 0xFFU);
+    it = std::copy(encaps.begin(), encaps.end(), it);
+
+    it = std::copy(session_id.begin(), session_id.end(), it);
+
+    return build_frame(std::span<const unsigned char>(buf.begin(), total_size));
 }
 
 inline std::vector<unsigned char>
@@ -269,7 +274,7 @@ build_chat(const std::string &to, const std::string &from,
     p.push_back(static_cast<unsigned char>((clen >> 8) & 0xFFU));
     p.push_back(static_cast<unsigned char>(clen & 0xFFU));
     p.insert(p.end(), ciphertext.begin(), ciphertext.end());
-    return build_frame(p);
+    return build_frame(std::span<const unsigned char>(p.data(), p.size()));
 }
 
 inline std::vector<unsigned char>
@@ -289,7 +294,7 @@ build_list_response(const std::vector<std::string> &users)
         p.push_back(static_cast<unsigned char>(u.size()));
         p.insert(p.end(), u.begin(), u.end());
     }
-    return build_frame(p);
+    return build_frame(std::span<const unsigned char>(p.data(), p.size()));
 }
 
 inline std::vector<unsigned char>
@@ -303,7 +308,7 @@ build_pubkey_request(const std::string &username)
     p.push_back(MSG_PUBKEY_REQUEST);
     p.push_back(static_cast<unsigned char>(username.size()));
     p.insert(p.end(), username.begin(), username.end());
-    return build_frame(p);
+    return build_frame(std::span<const unsigned char>(p.data(), p.size()));
 }
 
 inline std::vector<unsigned char>
@@ -325,7 +330,7 @@ build_pubkey_response(const std::string                &username,
     p.push_back(static_cast<unsigned char>(pklen & 0xFFU));
     if (pklen != 0U)
         p.insert(p.end(), pubkey.begin(), pubkey.end());
-    return build_frame(p);
+    return build_frame(std::span<const unsigned char>(p.data(), p.size()));
 }
 
 namespace proto_detail

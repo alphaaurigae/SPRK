@@ -238,61 +238,117 @@ inline void handle_hello(const Parsed &p) {
 
 
 inline std::optional<PeerInfo*> validate_peer(const Parsed &p, const std::string &peer_from, uint64_t ms) {
-    if (!validate_username(PeerNameView{peer_from}, MsU{ms}) || p.identity_pk.empty()) [[unlikely]] return std::nullopt;
+    if (!validate_username(PeerNameView{peer_from}, MsU{ms})) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: invalid sender username");
+        return std::nullopt;
+    }
+
+    if (p.identity_pk.empty()) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: chat without sender fingerprint");
+        return std::nullopt;
+    }
 
     const auto peer_key = to_hex(p.identity_pk.data(), p.identity_pk.size());
     auto it = peers.find(peer_key);
-    if (it == peers.end() || !it->second.ready || !check_rate_limit(it->second)) [[unlikely]] return std::nullopt;
+    if (it == peers.end()) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: peer not found for key " + peer_key);
+        return std::nullopt;
+    }
 
-    return &it->second;
+    PeerInfo &pi = it->second;
+
+    if (!pi.ready) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: peer " + peer_from + " not ready");
+        return std::nullopt;
+    }
+
+    if (!check_rate_limit(pi)) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: rate limit exceeded for " + peer_from);
+        return std::nullopt;
+    }
+
+    return &pi;
 }
 
 inline std::string compute_sender_fp_hex(const PeerInfo &pi) {
-    return pi.identity_pk.empty() ? std::string{} : fingerprint_to_hex(fingerprint_sha256({pi.identity_pk.begin(), pi.identity_pk.end()}));
+    if (pi.identity_pk.empty()) return {};
+    const auto fp = fingerprint_sha256(std::vector<unsigned char>(pi.identity_pk.begin(), pi.identity_pk.end()));
+    return fingerprint_to_hex(fp);
 }
 
 inline std::vector<unsigned char> build_aad_seq(const std::string &sender_fp_hex, uint64_t seq) {
-    const auto aad_s = AADBuilder{my_fp_hex, sender_fp_hex}.build_for_seq(seq);
-    return {aad_s.begin(), aad_s.end()};
+    const std::string aad_s = AADBuilder{my_fp_hex, sender_fp_hex}.build_for_seq(seq);
+    return std::vector<unsigned char>(aad_s.begin(), aad_s.end());
 }
 
-inline bool handle_sequence(PeerInfo &pi, uint64_t seq) {
-    if (is_replay_attack(seq, pi.recv_seq) || !is_sequence_gap_valid(seq, pi.recv_seq, DEFAULT_MAX_SEQ_GAP, DEFAULT_SEQ_JITTER_BUFFER)) [[unlikely]] return false;
+inline bool handle_sequence(PeerInfo &pi, uint64_t seq, uint64_t ms, const std::string &peer_from) {
+    if (is_replay_attack(seq, pi.recv_seq)) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: replay attack from " + peer_from +
+                    " seq=" + std::to_string(seq) + " < " + std::to_string(pi.recv_seq));
+        return false;
+    }
+
+    if (!is_sequence_gap_valid(seq, pi.recv_seq, DEFAULT_MAX_SEQ_GAP, DEFAULT_SEQ_JITTER_BUFFER)) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: seq gap too large from " + peer_from +
+                    " got=" + std::to_string(seq) + " expected=" + std::to_string(pi.recv_seq));
+        return false;
+    }
 
     const bool jitter_detected = is_sequence_in_jitter_range(seq, pi.recv_seq, DEFAULT_SEQ_JITTER_BUFFER);
-    if (jitter_detected) [[unlikely]] pi.recv_seq = seq;
-    else if (seq != pi.recv_seq) [[unlikely]] return false;
+    if (jitter_detected) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] WARNING: jitter detected from " + peer_from +
+                    " got=" + std::to_string(seq) + " expected=" + std::to_string(pi.recv_seq));
+        pi.recv_seq = seq;
+    } else if (seq != pi.recv_seq) [[unlikely]] {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: seq mismatch from " + peer_from +
+                    " got=" + std::to_string(seq) + " expected=" + std::to_string(pi.recv_seq));
+        return false;
+    }
 
     return true;
 }
 
 inline void handle_chat(const Parsed &p) {
-    const auto peer_from = trim(p.from);
-    const auto ms = get_current_timestamp_ms();
+    const std::string peer_from = trim(p.from);
+    const uint64_t ms = get_current_timestamp_ms();
 
     std::cerr << "[" << ms << "] handle_chat: from=" << peer_from
               << " seq=" << p.seq << " ct_len=" << p.ciphertext.size() << "\n";
 
     auto pi_opt = validate_peer(p, peer_from, ms);
-    if (!pi_opt) { dev_println("[" + std::to_string(ms) + "] REJECTED: invalid peer " + peer_from); return; }
+    if (!pi_opt) return;
     PeerInfo *pi = *pi_opt;
 
     if (is_message_timeout_exceeded(pi->last_recv_time, ms, DEFAULT_MESSAGE_TIMEOUT_MS)) [[unlikely]]
         dev_println("[" + std::to_string(ms) + "] WARNING: large time gap from " + peer_from);
 
-    if (!handle_sequence(*pi, p.seq)) [[unlikely]] return;
+    if (!handle_sequence(*pi, p.seq, ms, peer_from)) [[unlikely]] return;
 
     try {
-        const auto sender_fp_hex = compute_sender_fp_hex(*pi);
+        const std::string sender_fp_hex = compute_sender_fp_hex(*pi);
         const auto aad = build_aad_seq(sender_fp_hex, p.seq);
+
         const auto pt = aead_decrypt(pi->sk.key, p.ciphertext, aad, p.nonce);
-        if (pt.empty() || pt.size() > 65535) [[unlikely]] return;
+        if (pt.empty()) [[unlikely]] {
+            dev_println("[" + std::to_string(ms) + "] handle_chat: aead_decrypt returned empty for " + peer_from);
+            return;
+        }
+        if (pt.size() > 65535) [[unlikely]] {
+            dev_println("[" + std::to_string(ms) + "] REJECTED: invalid plaintext size from " + peer_from);
+            return;
+        }
 
-        const std::string msg(pt.begin(), pt.end()), ts = format_hhmmss(ms);
-        const auto shortfp = sender_fp_hex.empty() ? "(no fp)" : sender_fp_hex.substr(0, std::min<size_t>(10, sender_fp_hex.size()));
+        const std::string msg(pt.begin(), pt.end());
+        const std::string ts = format_hhmmss(ms);
 
-        std::cout << "[" << ts << "] [" << (peer_from == my_username ? "sent" : peer_from + " " + shortfp) << "] " << msg << "\n";
-        std::cout.flush();
+        if (peer_from == my_username) [[unlikely]] {
+            std::cout << "[" << ts << "] [sent] " << msg << "\n";
+        } else {
+            const std::string shortfp = sender_fp_hex.empty() ? "(no fp)" :
+                                        sender_fp_hex.substr(0, std::min<size_t>(10, sender_fp_hex.size()));
+            std::cout << "[" << ts << "] [" << peer_from << " " << shortfp << "] " << msg << "\n";
+            std::cout.flush();
+        }
 
         pi->recv_seq++;
         pi->last_recv_time = ms;
@@ -301,6 +357,9 @@ inline void handle_chat(const Parsed &p) {
                   << " seq=" << p.seq << " error=" << e.what() << "\n";
     }
 }
+
+
+
 
 
 

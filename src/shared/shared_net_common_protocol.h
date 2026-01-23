@@ -67,9 +67,48 @@ inline void ensure_range(size_t idx, size_t len, size_t total, const char* field
 }
 
 
-namespace proto_detail
-{
+namespace proto_detail {
 
+// low-level BE conversions
+[[nodiscard]] constexpr inline uint16_t load_be16(const unsigned char* p) noexcept
+{
+    return static_cast<uint16_t>((p[0] << 8) | p[1]);
+}
+
+[[nodiscard]] constexpr inline uint32_t load_be32(const unsigned char* p) noexcept
+{
+    return (static_cast<uint32_t>(p[0]) << 24) |
+           (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8)  |
+           static_cast<uint32_t>(p[3]);
+}
+
+constexpr inline void store_be16(unsigned char* p, uint16_t v) noexcept
+{
+    p[0] = static_cast<unsigned char>(v >> 8);
+    p[1] = static_cast<unsigned char>(v);
+}
+
+constexpr inline void store_be32(unsigned char* p, uint32_t v) noexcept
+{
+    p[0] = static_cast<unsigned char>(v >> 24);
+    p[1] = static_cast<unsigned char>(v >> 16);
+    p[2] = static_cast<unsigned char>(v >> 8);
+    p[3] = static_cast<unsigned char>(v);
+}
+
+// high-level reads
+[[nodiscard]] inline uint16_t read_u16_be(std::span<const unsigned char> payload, size_t idx) noexcept
+{
+    return load_be16(payload.data() + idx);
+}
+
+[[nodiscard]] inline uint32_t read_u32_be(std::span<const unsigned char> payload, size_t idx) noexcept
+{
+    return load_be32(payload.data() + idx);
+}
+
+// other proto_detail helpers
 [[nodiscard]] inline ptrdiff_t to_offset(size_t value) noexcept
 {
     return static_cast<ptrdiff_t>(value);
@@ -78,8 +117,7 @@ namespace proto_detail
 [[nodiscard]] inline std::string_view
 make_string_view(const unsigned char *data, size_t len) noexcept
 {
-    const void *vptr = data;
-    return {static_cast<const char *>(vptr), len};
+    return {reinterpret_cast<const char*>(data), len};
 }
 
 [[nodiscard]] inline std::vector<unsigned char>
@@ -89,35 +127,16 @@ extract_bytes(std::span<const unsigned char> payload, size_t start, size_t len)
             payload.begin() + to_offset(start + len)};
 }
 
-[[nodiscard]] inline uint16_t
-read_u16_be(std::span<const unsigned char> payload, size_t idx) noexcept
-{
-    return static_cast<uint16_t>((static_cast<uint16_t>(payload[idx]) << 8) |
-                                 static_cast<uint16_t>(payload[idx + 1]));
-}
-
-[[nodiscard]] inline uint32_t
-read_u32_be(std::span<const unsigned char> payload, size_t idx) noexcept
-{
-    return (static_cast<uint32_t>(payload[idx]) << 24) |
-           (static_cast<uint32_t>(payload[idx + 1]) << 16) |
-           (static_cast<uint32_t>(payload[idx + 2]) << 8) |
-           static_cast<uint32_t>(payload[idx + 3]);
-}
-
+// string / bytes readers
 [[nodiscard]] inline std::string
 read_string_u8(std::span<const unsigned char> payload, size_t &idx,
                size_t max_len, const char *field_name)
 {
     ensure_range(idx, 1, payload.size(), "length field");
-
     const uint8_t len = payload[idx++];
     if (len == 0 || len > max_len)
         throw std::runtime_error(std::string("bad ") + field_name + " length");
-
-    if (idx + len > payload.size())
-        throw std::runtime_error(std::string("truncated ") + field_name);
-
+    ensure_range(idx, len, payload.size(), field_name);
     std::string result{make_string_view(payload.data() + idx, len)};
     idx += len;
     return result;
@@ -133,16 +152,9 @@ read_bytes_u16(std::span<const unsigned char> payload, size_t &idx,
 
     if (len > max_len)
         throw std::runtime_error(std::string("bad ") + field_name + " length");
-
-    if (len == 0)
-    {
-        if (!allow_empty)
-            throw std::runtime_error(std::string("empty ") + field_name);
-        return {};
-    }
-
-    if (idx + len > payload.size())
-        throw std::runtime_error(std::string("truncated ") + field_name);
+    if (len == 0 && !allow_empty)
+        throw std::runtime_error(std::string("empty ") + field_name);
+    ensure_range(idx, len, payload.size(), field_name);
 
     auto result = extract_bytes(payload, idx, len);
     idx += len;
@@ -151,16 +163,13 @@ read_bytes_u16(std::span<const unsigned char> payload, size_t &idx,
 
 } // namespace proto_detail
 
-
 inline std::vector<unsigned char>
 build_frame(const std::vector<unsigned char> &payload)
 {
     const auto                 L = static_cast<uint32_t>(payload.size());
     std::vector<unsigned char> frame(4 + payload.size());
-    frame[0] = static_cast<unsigned char>((L >> 24) & 0xFFU);
-    frame[1] = static_cast<unsigned char>((L >> 16) & 0xFFU);
-    frame[2] = static_cast<unsigned char>((L >> 8) & 0xFFU);
-    frame[3] = static_cast<unsigned char>(L & 0xFFU);
+proto_detail::store_be32(frame.data(), L);
+
     std::copy(payload.begin(), payload.end(), frame.begin() + 4);
     return frame;
 }

@@ -1,0 +1,242 @@
+From 0fbfb42b50658273497d66e615ebbb5ff6aee5cf Mon Sep 17 00:00:00 2001
+From: alphaaurigae <4327142+alphaaurigae@users.noreply.github.com>
+Date: Fri, 23 Jan 2026 15:20:09 +0100
+Subject: [PATCH] protocol: centralize bounds checking, namespace debug flag,
+ and align AAD construction
+
+- Introduce ensure_range() helper and replace ad-hoc truncation checks in protocol parsers
+- Add FINGERPRINT_LEN constant and use it consistently in CHAT parsing
+- Update HELLO and CHAT parsers to use uniform bounds validation and index advancement
+- Move debug_mode into shared_util namespace and update call sites
+- Relocate and inline make_symmetric_message_aad() to ensure sorted-fingerprint AAD construction
+---
+ src/client/client_cmdline_util.h        |  8 ++--
+ src/shared/shared_common_crypto.h       | 26 ++++++------
+ src/shared/shared_common_util.h         |  6 ++-
+ src/shared/shared_net_common_protocol.h | 55 +++++++++++--------------
+ 4 files changed, 43 insertions(+), 52 deletions(-)
+
+diff --git a/src/client/client_cmdline_util.h b/src/client/client_cmdline_util.h
+index f8b18cc..607f8d0 100644
+--- a/src/client/client_cmdline_util.h
++++ b/src/client/client_cmdline_util.h
+@@ -34,10 +34,10 @@ inline ConnectionConfig parse_command_line_args(std::span<char *> args)
+ 
+     for (std::size_t i = 1; i < args.size(); ++i)
+     {
+-        if (std::string_view(args[i]) == "--debug")
+-        {
+-            debug_mode = true;
+-        }
++if (std::string_view(args[i]) == "--debug")
++{
++    shared_util::debug_mode = true;
++}
+     }
+ 
+     ConnectionConfig config;
+diff --git a/src/shared/shared_common_crypto.h b/src/shared/shared_common_crypto.h
+index 3e87e47..a2ac039 100644
+--- a/src/shared/shared_common_crypto.h
++++ b/src/shared/shared_common_crypto.h
+@@ -34,7 +34,17 @@ inline constexpr std::size_t MIN_FP_PREFIX_HEX = 16;
+ 
+ inline std::string make_symmetric_message_aad(std::string_view sender_fp,
+                                               std::string_view receiver_fp,
+-                                              uint32_t         seq);
++                                              uint32_t         seq)
++{
++    // CRITICAL: AAD must match session key derivation order
++    // Session keys are derived with sorted fingerprints (a < b)
++    // So AAD must also use sorted order, NOT sender/receiver order
++    std::string a(sender_fp);
++    std::string b(receiver_fp);
++    if (a > b)
++        std::swap(a, b);
++    return a + "|" + b + "|" + std::to_string(seq);
++}
+ 
+ struct AADBuilder
+ {
+@@ -846,17 +856,5 @@ compute_fingerprint_array(std::span<const unsigned char> pk)
+     return fingerprint_sha256(pk);
+ }
+ 
+-inline std::string make_symmetric_message_aad(std::string_view sender_fp,
+-                                              std::string_view receiver_fp,
+-                                              uint32_t         seq)
+-{
+-    // CRITICAL: AAD must match session key derivation order
+-    // Session keys are derived with sorted fingerprints (a < b)
+-    // So AAD must also use sorted order, NOT sender/receiver order
+-    std::string a(sender_fp);
+-    std::string b(receiver_fp);
+-    if (a > b)
+-        std::swap(a, b);
+-    return a + "|" + b + "|" + std::to_string(seq);
+-}
++
+ #endif
+\ No newline at end of file
+diff --git a/src/shared/shared_common_util.h b/src/shared/shared_common_util.h
+index f17198d..e4765f0 100644
+--- a/src/shared/shared_common_util.h
++++ b/src/shared/shared_common_util.h
+@@ -15,17 +15,19 @@
+ #include <string_view>
+ #include <vector>
+ 
++namespace shared_util {
+ inline std::atomic_bool debug_mode{false};
++}
+ 
+ inline void dev_print(std::string_view s)
+ {
+-    if (debug_mode.load())
++    if (shared_util::debug_mode.load())
+         std::cout << s;
+ }
+ 
+ inline void dev_println(std::string_view s)
+ {
+-    if (debug_mode.load())
++    if (shared_util::debug_mode.load())
+         std::cout << s << "\n";
+ }
+ 
+diff --git a/src/shared/shared_net_common_protocol.h b/src/shared/shared_net_common_protocol.h
+index 7ea4203..ece30c1 100644
+--- a/src/shared/shared_net_common_protocol.h
++++ b/src/shared/shared_net_common_protocol.h
+@@ -30,6 +30,7 @@ constexpr size_t NONCE_LEN      = 12;
+ constexpr size_t MAX_CIPHER     = 65535;
+ constexpr size_t MAX_USERS_LIST = 255;
+ constexpr size_t SESSION_ID_LEN = 60;
++constexpr size_t FINGERPRINT_LEN = 32;
+ 
+ enum MsgType : uint8_t
+ {
+@@ -61,6 +62,11 @@ struct Parsed
+     std::vector<std::string>   users;
+ };
+ 
++inline void ensure_range(size_t idx, size_t len, size_t total, const char* field) {
++    if (idx + len > total) throw std::runtime_error(std::string("truncated ") + field);
++}
++
++
+ namespace proto_detail
+ {
+ 
+@@ -103,9 +109,7 @@ read_u32_be(std::span<const unsigned char> payload, size_t idx) noexcept
+ read_string_u8(std::span<const unsigned char> payload, size_t &idx,
+                size_t max_len, const char *field_name)
+ {
+-    if (idx + 1 > payload.size())
+-        throw std::runtime_error(std::string("truncated ") + field_name +
+-                                 " length");
++    ensure_range(idx, 1, payload.size(), "length field");
+ 
+     const uint8_t len = payload[idx++];
+     if (len == 0 || len > max_len)
+@@ -123,10 +127,7 @@ read_string_u8(std::span<const unsigned char> payload, size_t &idx,
+ read_bytes_u16(std::span<const unsigned char> payload, size_t &idx,
+                size_t max_len, const char *field_name, bool allow_empty = false)
+ {
+-    if (idx + 2 > payload.size())
+-        throw std::runtime_error(std::string("truncated ") + field_name +
+-                                 " length");
+-
++    ensure_range(idx, 2, payload.size(), "length field");
+     const uint16_t len = read_u16_be(payload, idx);
+     idx += 2;
+ 
+@@ -150,6 +151,7 @@ read_bytes_u16(std::span<const unsigned char> payload, size_t &idx,
+ 
+ } // namespace proto_detail
+ 
++
+ inline std::vector<unsigned char>
+ build_frame(const std::vector<unsigned char> &payload)
+ {
+@@ -328,31 +330,25 @@ inline Parsed parse_hello(std::span<const unsigned char> payload, size_t idx)
+ 
+     out.username = read_string_u8(payload, idx, MAX_USERNAME, "username");
+ 
+-    if (idx + 1 > payload.size())
+-        throw std::runtime_error("truncated eph_alg");
++    ensure_range(idx, 1, payload.size(), "eph_alg");
+     out.eph_alg = payload[idx++];
+-    out.eph_pk =
+-        read_bytes_u16(payload, idx, MAX_PQC_PUBKEY_LEN, "eph_pk", true);
++    out.eph_pk = read_bytes_u16(payload, idx, MAX_PQC_PUBKEY_LEN, "eph_pk", true);
+ 
+-    if (idx + 1 > payload.size())
+-        throw std::runtime_error("truncated id_alg");
++    ensure_range(idx, 1, payload.size(), "id_alg");
+     out.id_alg = payload[idx++];
+-    out.identity_pk =
+-        read_bytes_u16(payload, idx, MAX_PQC_PUBKEY_LEN, "identity_pk", true);
+-
+-    out.signature =
+-        read_bytes_u16(payload, idx, MAX_PQC_SIG_LEN, "signature", true);
++    out.identity_pk = read_bytes_u16(payload, idx, MAX_PQC_PUBKEY_LEN, "identity_pk", true);
+ 
++    out.signature = read_bytes_u16(payload, idx, MAX_PQC_SIG_LEN, "signature", true);
+     out.encaps = read_bytes_u16(payload, idx, 65535, "encaps", true);
+ 
+-    if (idx + SESSION_ID_LEN > payload.size())
+-        throw std::runtime_error("truncated session_id");
+-    out.session_id =
+-        std::string{make_string_view(payload.data() + idx, SESSION_ID_LEN)};
++    ensure_range(idx, SESSION_ID_LEN, payload.size(), "session_id");
++    out.session_id = std::string{make_string_view(payload.data() + idx, SESSION_ID_LEN)};
++    idx += SESSION_ID_LEN;
+ 
+     return out;
+ }
+ 
++
+ inline Parsed parse_chat(std::span<const unsigned char> payload, size_t idx)
+ {
+     Parsed out;
+@@ -360,31 +356,26 @@ inline Parsed parse_chat(std::span<const unsigned char> payload, size_t idx)
+     out.type    = MSG_CHAT;
+ 
+     out.to = read_string_u8(payload, idx, MAX_USERNAME, "to");
+-
+     out.from = read_string_u8(payload, idx, MAX_USERNAME, "from");
+ 
+-    constexpr size_t FINGERPRINT_LEN = 32;
+-    if (idx + FINGERPRINT_LEN > payload.size())
+-        throw std::runtime_error("truncated fingerprint");
++    ensure_range(idx, FINGERPRINT_LEN, payload.size(), "fingerprint");
+     out.identity_pk = extract_bytes(payload, idx, FINGERPRINT_LEN);
+     idx += FINGERPRINT_LEN;
+ 
+-    if (idx + 4 > payload.size())
+-        throw std::runtime_error("truncated seq");
++    ensure_range(idx, 4, payload.size(), "seq");
+     out.seq = read_u32_be(payload, idx);
+     idx += 4;
+ 
+-    if (idx + NONCE_LEN > payload.size())
+-        throw std::runtime_error("truncated nonce");
++    ensure_range(idx, NONCE_LEN, payload.size(), "nonce");
+     out.nonce = extract_bytes(payload, idx, NONCE_LEN);
+     idx += NONCE_LEN;
+ 
+-    out.ciphertext =
+-        read_bytes_u16(payload, idx, MAX_CIPHER, "ciphertext", true);
++    out.ciphertext = read_bytes_u16(payload, idx, MAX_CIPHER, "ciphertext", true);
+ 
+     return out;
+ }
+ 
++
+ inline Parsed parse_list_response(std::span<const unsigned char> payload,
+                                   size_t                         idx)
+ {
+-- 
+2.43.0
+

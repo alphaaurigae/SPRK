@@ -12,7 +12,6 @@
 #include "shared_net_rekey_util.h"
 #include "shared_net_tls_frame_io.h"
 
-
 #include <algorithm>
 #include <array>
 #include <asio/io_context.hpp>
@@ -23,11 +22,11 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <unordered_set>
-#include <vector>
+#include <optional>
 #include <set>
 #include <string>
-#include <optional>
+#include <unordered_set>
+#include <vector>
 
 struct RecipientFP;
 
@@ -125,52 +124,113 @@ inline void process_pubkey_response(const Parsed &p)
     std::cout << "pubkey " << p.username << " " << hexpk << "\n";
 }
 
-inline std::optional<std::string> validate_and_compute_peer_key(const Parsed &p,
-                                                                std::string &peer_fp_hex,
-                                                                const std::string &peer_name,
-                                                                uint64_t ms) {
+inline std::optional<std::string>
+validate_and_compute_peer_key(const Parsed &p, std::string &peer_fp_hex,
+                              const std::string &peer_name, uint64_t ms)
+{
     const auto key_opt = compute_peer_key(p, peer_fp_hex);
-    if (!key_opt.has_value()) {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: hello without identity_pk from " + peer_name);
+    if (!key_opt.has_value())
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] REJECTED: hello without identity_pk from " + peer_name);
         return std::nullopt;
     }
     return key_opt;
 }
 
-inline bool update_peer_state(PeerInfo &pi,
-                              const Parsed &p,
-                              const std::string &peer_name,
-                              const std::string &peer_key,
-                              const std::string &peer_fp_hex,
-                              std::unordered_set<std::string> &fps_set,
-                              uint64_t ms) {
-    update_peer_info(pi, PeerNameStr{peer_name}, PeerFpHexStr{peer_fp_hex}, fps_set);
+inline bool
+update_peer_state(PeerInfo &pi, const Parsed &p, const std::string &peer_name,
+                  const std::string &peer_key, const std::string &peer_fp_hex,
+                  std::unordered_set<std::string> &fps_set, uint64_t ms)
+{
+    update_peer_info(pi, PeerNameStr{peer_name}, PeerFpHexStr{peer_fp_hex},
+                     fps_set);
 
-    if (!check_peer_limits(PeerKeyView{peer_key}, MsU{ms})) return false;
-    if (!check_rate_and_signature(pi, p, PeerNameView{peer_name}, MsU{ms})) return false;
+    if (!check_peer_limits(PeerKeyView{peer_key}, MsU{ms}))
+        return false;
+    if (!check_rate_and_signature(pi, p, PeerNameView{peer_name}, MsU{ms}))
+        return false;
 
-    bool pk_changed = false;
-    bool has_new_encaps = false;
-    const bool needs_key_handling = detect_key_changes(pi, p, pk_changed, has_new_encaps);
-    if (pk_changed) handle_rekey(pi, PeerNameStr{peer_name}, MsU{ms});
-    if (!needs_key_handling && pi.ready) return false;
+    bool       pk_changed     = false;
+    bool       has_new_encaps = false;
+    const bool needs_key_handling =
+        detect_key_changes(pi, p, pk_changed, has_new_encaps);
+    if (pk_changed)
+        handle_rekey(pi, PeerNameStr{peer_name}, MsU{ms});
+    if (!needs_key_handling && pi.ready)
+        return false;
 
     update_keys_and_log_connect(pi, p, PeerNameStr{peer_name}, MsU{ms});
     return true;
 }
 
 inline std::string build_key_context_for_session(const std::string &peer_fp_hex,
-                                                 const std::string &session_id) {
+                                                 const std::string &session_id)
+{
     return build_key_context_for_peer(
-        KeyContextParams::make(
-            KeyContextParams::MyFP{my_fp_hex},
-            KeyContextParams::PeerFP{peer_fp_hex},
-            KeyContextParams::SessionID{session_id}
-        )
-    );
+        KeyContextParams::make(KeyContextParams::MyFP{my_fp_hex},
+                               KeyContextParams::PeerFP{peer_fp_hex},
+                               KeyContextParams::SessionID{session_id}));
 }
 
-inline void handle_hello(const Parsed &p) {
+
+
+
+namespace detail
+{
+inline void maybe_send_list_request(const Parsed &p)
+{
+    if (!p.encaps.empty())
+    {
+        const std::vector<unsigned char> req{PROTO_VERSION, MSG_LIST_REQUEST};
+        const auto frame = build_frame(req);
+        auto frame_ptr = std::make_shared<std::vector<unsigned char>>(frame);
+        std::lock_guard<std::mutex> lk(ssl_io_mtx);
+        if (ssl_stream)
+            async_write_frame(ssl_stream, frame_ptr,
+                              [frame_ptr](const std::error_code &, std::size_t) {});
+    }
+}
+
+inline void handle_ready_state(const Parsed &p, const std::string &peer_name,
+                               PeerInfo &pi, bool was_ready, uint64_t ms)
+{
+    if (!was_ready && pi.ready)
+    {
+        std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
+        maybe_send_list_request(p);
+    }
+}
+
+inline bool process_peer_encaps(const Parsed &p, const std::string &peer_name,
+                                PeerInfo &pi, const std::string &key_context,
+                                const ExpectedLengths &expected, bool initiator,
+                                uint64_t ms)
+{
+    const bool was_ready = pi.ready;
+
+    if (!p.encaps.empty() || (initiator && !pi.sent_hello))
+    {
+        const bool handled = initiator
+            ? try_handle_initiator_encaps(pi, p, PeerNameView{peer_name},
+                                          KeyContextView{key_context},
+                                          MsS{static_cast<int64_t>(ms)})
+            : handle_encaps_present(pi, p, PeerNameView{peer_name},
+                                    KeyContextView{key_context},
+                                    ExpectedCtLen{expected.ct_len}, MsU{ms});
+
+        if (handled)
+            handle_ready_state(p, peer_name, pi, was_ready, ms);
+
+        return handled;
+    }
+
+    return false;
+}
+} // namespace detail
+
+inline void handle_hello(const Parsed &p)
+{
     const std::string peer_name = trim(p.username);
     const uint64_t ms = get_current_timestamp_ms();
 
@@ -178,57 +238,49 @@ inline void handle_hello(const Parsed &p) {
               << "' eph_pk_len=" << p.eph_pk.size()
               << " encaps_len=" << p.encaps.size() << "\n";
 
-    if (!validate_username(PeerNameView{peer_name}, MsU{ms})) return;
+    if (!validate_username(PeerNameView{peer_name}, MsU{ms}))
+        return;
 
     const std::lock_guard<std::mutex> lk(peers_mtx);
 
     std::string peer_fp_hex;
-    const auto peer_key_opt = validate_and_compute_peer_key(p, peer_fp_hex, peer_name, ms);
-    if (!peer_key_opt.has_value()) return;
+    const auto peer_key_opt =
+        validate_and_compute_peer_key(p, peer_fp_hex, peer_name, ms);
+    if (!peer_key_opt.has_value())
+        return;
     const std::string peer_key = peer_key_opt.value();
 
-    auto &pi = peers[peer_key];
+    auto &pi      = peers[peer_key];
     auto &fps_set = fps_by_username[peer_name];
 
-    if (!update_peer_state(pi, p, peer_name, peer_key, peer_fp_hex, fps_set, ms)) return;
+    if (!update_peer_state(pi, p, peer_name, peer_key, peer_fp_hex, fps_set, ms))
+        return;
 
     ExpectedLengths expected{};
-    if (!get_expected_lengths(expected, ms)) return;
-    if (!validate_eph_pk_length(p, PeerNameView{peer_name}, ExpectedPkLen{expected.pk_len}, MsU{ms})) return;
+    if (!get_expected_lengths(expected, ms))
+        return;
 
-    const std::string key_context = build_key_context_for_session(peer_fp_hex, p.session_id);
+    if (!validate_eph_pk_length(p, PeerNameView{peer_name},
+                                ExpectedPkLen{expected.pk_len}, MsU{ms}))
+        return;
+
+    const std::string key_context =
+        build_key_context_for_session(peer_fp_hex, p.session_id);
     const bool i_am_initiator = !peer_fp_hex.empty() && (my_fp_hex < peer_fp_hex);
 
-    auto handle_peer_encaps = [&](bool initiator) -> bool {
-        const bool was_ready = pi.ready;
-        auto handle_ready_state = [&](bool ready_flag) {
-            if (!was_ready && ready_flag) {
-                std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
-                if (!p.encaps.empty()) {
-                    const std::vector<unsigned char> req{PROTO_VERSION, MSG_LIST_REQUEST};
-                    const auto frame = build_frame(req);
-                    auto frame_ptr = std::make_shared<std::vector<unsigned char>>(frame);
-                    std::lock_guard<std::mutex> lk2(ssl_io_mtx);
-                    if (ssl_stream) async_write_frame(ssl_stream, frame_ptr, [frame_ptr](const std::error_code &, std::size_t){});
-                }
-            }
-        };
-
-        if (!p.encaps.empty() || (initiator && !pi.sent_hello)) {
-            bool handled = initiator
-                ? try_handle_initiator_encaps(pi, p, PeerNameView{peer_name}, KeyContextView{key_context}, MsS{static_cast<int64_t>(ms)})
-                : handle_encaps_present(pi, p, PeerNameView{peer_name}, KeyContextView{key_context}, ExpectedCtLen{expected.ct_len}, MsU{ms});
-            if (handled) handle_ready_state(pi.ready);
-            return handled;
+    if (!detail::process_peer_encaps(p, peer_name, pi, key_context, expected,
+                                     i_am_initiator, ms))
+    {
+        if (!i_am_initiator)
+        {
+            if (pi.ready)
+                dev_println("[" + std::to_string(ms) +
+                            "] responder confirmed ready for " + peer_name);
+            else
+                log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
         }
-        return false;
-    };
-
-    if (!handle_peer_encaps(i_am_initiator)) {
-        if (!i_am_initiator) {
-            if (pi.ready) dev_println("[" + std::to_string(ms) + "] responder confirmed ready for " + peer_name);
-            else log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
-        } else log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
+        else
+            log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
     }
 }
 
@@ -236,134 +288,180 @@ inline void handle_hello(const Parsed &p) {
 
 
 
-
-inline std::optional<PeerInfo*> validate_peer(const Parsed &p, const std::string &peer_from, uint64_t ms) {
-    if (!validate_username(PeerNameView{peer_from}, MsU{ms})) [[unlikely]] {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: invalid sender username");
+inline std::optional<PeerInfo *>
+validate_peer(const Parsed &p, const std::string &peer_from, uint64_t ms)
+{
+    if (!validate_username(PeerNameView{peer_from}, MsU{ms})) [[unlikely]]
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] REJECTED: invalid sender username");
         return std::nullopt;
     }
 
-    if (p.identity_pk.empty()) [[unlikely]] {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: chat without sender fingerprint");
+    if (p.identity_pk.empty()) [[unlikely]]
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] REJECTED: chat without sender fingerprint");
         return std::nullopt;
     }
 
     const auto peer_key = to_hex(p.identity_pk.data(), p.identity_pk.size());
-    auto it = peers.find(peer_key);
-    if (it == peers.end()) [[unlikely]] {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: peer not found for key " + peer_key);
+    auto       it       = peers.find(peer_key);
+    if (it == peers.end()) [[unlikely]]
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] REJECTED: peer not found for key " + peer_key);
         return std::nullopt;
     }
 
     PeerInfo &pi = it->second;
 
-    if (!pi.ready) [[unlikely]] {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: peer " + peer_from + " not ready");
+    if (!pi.ready) [[unlikely]]
+    {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: peer " + peer_from +
+                    " not ready");
         return std::nullopt;
     }
 
-    if (!check_rate_limit(pi)) [[unlikely]] {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: rate limit exceeded for " + peer_from);
+    if (!check_rate_limit(pi)) [[unlikely]]
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] REJECTED: rate limit exceeded for " + peer_from);
         return std::nullopt;
     }
 
     return &pi;
 }
 
-inline std::string compute_sender_fp_hex(const PeerInfo &pi) {
-    if (pi.identity_pk.empty()) return {};
-    const auto fp = fingerprint_sha256(std::vector<unsigned char>(pi.identity_pk.begin(), pi.identity_pk.end()));
+inline std::string compute_sender_fp_hex(const PeerInfo &pi)
+{
+    if (pi.identity_pk.empty())
+        return {};
+    const auto fp = fingerprint_sha256(std::vector<unsigned char>(
+        pi.identity_pk.begin(), pi.identity_pk.end()));
     return fingerprint_to_hex(fp);
 }
 
-inline std::vector<unsigned char> build_aad_seq(const std::string &sender_fp_hex, uint64_t seq) {
-    const std::string aad_s = AADBuilder{my_fp_hex, sender_fp_hex}.build_for_seq(seq);
+inline std::vector<unsigned char>
+build_aad_seq(const std::string &sender_fp_hex, uint64_t seq)
+{
+    const std::string aad_s =
+        AADBuilder{my_fp_hex, sender_fp_hex}.build_for_seq(seq);
     return std::vector<unsigned char>(aad_s.begin(), aad_s.end());
 }
 
-inline bool handle_sequence(PeerInfo &pi, uint64_t seq, uint64_t ms, const std::string &peer_from) {
-    if (is_replay_attack(seq, pi.recv_seq)) [[unlikely]] {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: replay attack from " + peer_from +
-                    " seq=" + std::to_string(seq) + " < " + std::to_string(pi.recv_seq));
+inline bool handle_sequence(PeerInfo &pi, uint64_t seq, uint64_t ms,
+                            const std::string &peer_from)
+{
+    if (is_replay_attack(seq, pi.recv_seq)) [[unlikely]]
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] REJECTED: replay attack from " + peer_from + " seq=" +
+                    std::to_string(seq) + " < " + std::to_string(pi.recv_seq));
         return false;
     }
 
-    if (!is_sequence_gap_valid(seq, pi.recv_seq, DEFAULT_MAX_SEQ_GAP, DEFAULT_SEQ_JITTER_BUFFER)) [[unlikely]] {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: seq gap too large from " + peer_from +
-                    " got=" + std::to_string(seq) + " expected=" + std::to_string(pi.recv_seq));
+    if (!is_sequence_gap_valid(seq, pi.recv_seq, DEFAULT_MAX_SEQ_GAP,
+                               DEFAULT_SEQ_JITTER_BUFFER)) [[unlikely]]
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] REJECTED: seq gap too large from " + peer_from +
+                    " got=" + std::to_string(seq) +
+                    " expected=" + std::to_string(pi.recv_seq));
         return false;
     }
 
-    const bool jitter_detected = is_sequence_in_jitter_range(seq, pi.recv_seq, DEFAULT_SEQ_JITTER_BUFFER);
-    if (jitter_detected) [[unlikely]] {
-        dev_println("[" + std::to_string(ms) + "] WARNING: jitter detected from " + peer_from +
-                    " got=" + std::to_string(seq) + " expected=" + std::to_string(pi.recv_seq));
+    const bool jitter_detected = is_sequence_in_jitter_range(
+        seq, pi.recv_seq, DEFAULT_SEQ_JITTER_BUFFER);
+    if (jitter_detected) [[unlikely]]
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] WARNING: jitter detected from " + peer_from +
+                    " got=" + std::to_string(seq) +
+                    " expected=" + std::to_string(pi.recv_seq));
         pi.recv_seq = seq;
-    } else if (seq != pi.recv_seq) [[unlikely]] {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: seq mismatch from " + peer_from +
-                    " got=" + std::to_string(seq) + " expected=" + std::to_string(pi.recv_seq));
+    }
+    else if (seq != pi.recv_seq) [[unlikely]]
+    {
+        dev_println("[" + std::to_string(ms) +
+                    "] REJECTED: seq mismatch from " + peer_from +
+                    " got=" + std::to_string(seq) +
+                    " expected=" + std::to_string(pi.recv_seq));
         return false;
     }
 
     return true;
 }
 
-inline void handle_chat(const Parsed &p) {
+inline void handle_chat(const Parsed &p)
+{
     const std::string peer_from = trim(p.from);
-    const uint64_t ms = get_current_timestamp_ms();
+    const uint64_t    ms        = get_current_timestamp_ms();
 
     std::cerr << "[" << ms << "] handle_chat: from=" << peer_from
               << " seq=" << p.seq << " ct_len=" << p.ciphertext.size() << "\n";
 
     auto pi_opt = validate_peer(p, peer_from, ms);
-    if (!pi_opt) return;
+    if (!pi_opt)
+        return;
     PeerInfo *pi = *pi_opt;
 
-    if (is_message_timeout_exceeded(pi->last_recv_time, ms, DEFAULT_MESSAGE_TIMEOUT_MS)) [[unlikely]]
-        dev_println("[" + std::to_string(ms) + "] WARNING: large time gap from " + peer_from);
+    if (is_message_timeout_exceeded(pi->last_recv_time, ms,
+                                    DEFAULT_MESSAGE_TIMEOUT_MS)) [[unlikely]]
+        dev_println("[" + std::to_string(ms) +
+                    "] WARNING: large time gap from " + peer_from);
 
-    if (!handle_sequence(*pi, p.seq, ms, peer_from)) [[unlikely]] return;
+    if (!handle_sequence(*pi, p.seq, ms, peer_from)) [[unlikely]]
+        return;
 
-    try {
+    try
+    {
         const std::string sender_fp_hex = compute_sender_fp_hex(*pi);
-        const auto aad = build_aad_seq(sender_fp_hex, p.seq);
+        const auto        aad           = build_aad_seq(sender_fp_hex, p.seq);
 
         const auto pt = aead_decrypt(pi->sk.key, p.ciphertext, aad, p.nonce);
-        if (pt.empty()) [[unlikely]] {
-            dev_println("[" + std::to_string(ms) + "] handle_chat: aead_decrypt returned empty for " + peer_from);
+        if (pt.empty()) [[unlikely]]
+        {
+            dev_println("[" + std::to_string(ms) +
+                        "] handle_chat: aead_decrypt returned empty for " +
+                        peer_from);
             return;
         }
-        if (pt.size() > 65535) [[unlikely]] {
-            dev_println("[" + std::to_string(ms) + "] REJECTED: invalid plaintext size from " + peer_from);
+        if (pt.size() > 65535) [[unlikely]]
+        {
+            dev_println("[" + std::to_string(ms) +
+                        "] REJECTED: invalid plaintext size from " + peer_from);
             return;
         }
 
         const std::string msg(pt.begin(), pt.end());
         const std::string ts = format_hhmmss(ms);
 
-        if (peer_from == my_username) [[unlikely]] {
+        if (peer_from == my_username) [[unlikely]]
+        {
             std::cout << "[" << ts << "] [sent] " << msg << "\n";
-        } else {
-            const std::string shortfp = sender_fp_hex.empty() ? "(no fp)" :
-                                        sender_fp_hex.substr(0, std::min<size_t>(10, sender_fp_hex.size()));
-            std::cout << "[" << ts << "] [" << peer_from << " " << shortfp << "] " << msg << "\n";
+        }
+        else
+        {
+            const std::string shortfp =
+                sender_fp_hex.empty()
+                    ? "(no fp)"
+                    : sender_fp_hex.substr(
+                          0, std::min<size_t>(10, sender_fp_hex.size()));
+            std::cout << "[" << ts << "] [" << peer_from << " " << shortfp
+                      << "] " << msg << "\n";
             std::cout.flush();
         }
 
         pi->recv_seq++;
         pi->last_recv_time = ms;
-    } catch (const std::exception &e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "[" << ms << "] decrypt failed from=" << peer_from
                   << " seq=" << p.seq << " error=" << e.what() << "\n";
     }
 }
-
-
-
-
-
-
-
 
 inline std::vector<std::string> find_matching_peers(const std::string &token)
 {

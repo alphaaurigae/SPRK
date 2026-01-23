@@ -30,6 +30,7 @@ constexpr size_t NONCE_LEN      = 12;
 constexpr size_t MAX_CIPHER     = 65535;
 constexpr size_t MAX_USERS_LIST = 255;
 constexpr size_t SESSION_ID_LEN = 60;
+constexpr size_t FINGERPRINT_LEN = 32;
 
 enum MsgType : uint8_t
 {
@@ -60,6 +61,11 @@ struct Parsed
     std::vector<unsigned char> ciphertext;
     std::vector<std::string>   users;
 };
+
+inline void ensure_range(size_t idx, size_t len, size_t total, const char* field) {
+    if (idx + len > total) throw std::runtime_error(std::string("truncated ") + field);
+}
+
 
 namespace proto_detail
 {
@@ -103,9 +109,7 @@ read_u32_be(std::span<const unsigned char> payload, size_t idx) noexcept
 read_string_u8(std::span<const unsigned char> payload, size_t &idx,
                size_t max_len, const char *field_name)
 {
-    if (idx + 1 > payload.size())
-        throw std::runtime_error(std::string("truncated ") + field_name +
-                                 " length");
+    ensure_range(idx, 1, payload.size(), "length field");
 
     const uint8_t len = payload[idx++];
     if (len == 0 || len > max_len)
@@ -123,10 +127,7 @@ read_string_u8(std::span<const unsigned char> payload, size_t &idx,
 read_bytes_u16(std::span<const unsigned char> payload, size_t &idx,
                size_t max_len, const char *field_name, bool allow_empty = false)
 {
-    if (idx + 2 > payload.size())
-        throw std::runtime_error(std::string("truncated ") + field_name +
-                                 " length");
-
+    ensure_range(idx, 2, payload.size(), "length field");
     const uint16_t len = read_u16_be(payload, idx);
     idx += 2;
 
@@ -149,6 +150,7 @@ read_bytes_u16(std::span<const unsigned char> payload, size_t &idx,
 }
 
 } // namespace proto_detail
+
 
 inline std::vector<unsigned char>
 build_frame(const std::vector<unsigned char> &payload)
@@ -328,30 +330,24 @@ inline Parsed parse_hello(std::span<const unsigned char> payload, size_t idx)
 
     out.username = read_string_u8(payload, idx, MAX_USERNAME, "username");
 
-    if (idx + 1 > payload.size())
-        throw std::runtime_error("truncated eph_alg");
+    ensure_range(idx, 1, payload.size(), "eph_alg");
     out.eph_alg = payload[idx++];
-    out.eph_pk =
-        read_bytes_u16(payload, idx, MAX_PQC_PUBKEY_LEN, "eph_pk", true);
+    out.eph_pk = read_bytes_u16(payload, idx, MAX_PQC_PUBKEY_LEN, "eph_pk", true);
 
-    if (idx + 1 > payload.size())
-        throw std::runtime_error("truncated id_alg");
+    ensure_range(idx, 1, payload.size(), "id_alg");
     out.id_alg = payload[idx++];
-    out.identity_pk =
-        read_bytes_u16(payload, idx, MAX_PQC_PUBKEY_LEN, "identity_pk", true);
+    out.identity_pk = read_bytes_u16(payload, idx, MAX_PQC_PUBKEY_LEN, "identity_pk", true);
 
-    out.signature =
-        read_bytes_u16(payload, idx, MAX_PQC_SIG_LEN, "signature", true);
-
+    out.signature = read_bytes_u16(payload, idx, MAX_PQC_SIG_LEN, "signature", true);
     out.encaps = read_bytes_u16(payload, idx, 65535, "encaps", true);
 
-    if (idx + SESSION_ID_LEN > payload.size())
-        throw std::runtime_error("truncated session_id");
-    out.session_id =
-        std::string{make_string_view(payload.data() + idx, SESSION_ID_LEN)};
+    ensure_range(idx, SESSION_ID_LEN, payload.size(), "session_id");
+    out.session_id = std::string{make_string_view(payload.data() + idx, SESSION_ID_LEN)};
+    idx += SESSION_ID_LEN;
 
     return out;
 }
+
 
 inline Parsed parse_chat(std::span<const unsigned char> payload, size_t idx)
 {
@@ -360,30 +356,25 @@ inline Parsed parse_chat(std::span<const unsigned char> payload, size_t idx)
     out.type    = MSG_CHAT;
 
     out.to = read_string_u8(payload, idx, MAX_USERNAME, "to");
-
     out.from = read_string_u8(payload, idx, MAX_USERNAME, "from");
 
-    constexpr size_t FINGERPRINT_LEN = 32;
-    if (idx + FINGERPRINT_LEN > payload.size())
-        throw std::runtime_error("truncated fingerprint");
+    ensure_range(idx, FINGERPRINT_LEN, payload.size(), "fingerprint");
     out.identity_pk = extract_bytes(payload, idx, FINGERPRINT_LEN);
     idx += FINGERPRINT_LEN;
 
-    if (idx + 4 > payload.size())
-        throw std::runtime_error("truncated seq");
+    ensure_range(idx, 4, payload.size(), "seq");
     out.seq = read_u32_be(payload, idx);
     idx += 4;
 
-    if (idx + NONCE_LEN > payload.size())
-        throw std::runtime_error("truncated nonce");
+    ensure_range(idx, NONCE_LEN, payload.size(), "nonce");
     out.nonce = extract_bytes(payload, idx, NONCE_LEN);
     idx += NONCE_LEN;
 
-    out.ciphertext =
-        read_bytes_u16(payload, idx, MAX_CIPHER, "ciphertext", true);
+    out.ciphertext = read_bytes_u16(payload, idx, MAX_CIPHER, "ciphertext", true);
 
     return out;
 }
+
 
 inline Parsed parse_list_response(std::span<const unsigned char> payload,
                                   size_t                         idx)

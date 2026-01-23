@@ -34,7 +34,17 @@ inline constexpr std::size_t MIN_FP_PREFIX_HEX = 16;
 
 inline std::string make_symmetric_message_aad(std::string_view sender_fp,
                                               std::string_view receiver_fp,
-                                              uint32_t         seq);
+                                              uint32_t         seq)
+{
+    // CRITICAL: AAD must match session key derivation order
+    // Session keys are derived with sorted fingerprints (a < b)
+    // So AAD must also use sorted order, NOT sender/receiver order
+    std::string a(sender_fp);
+    std::string b(receiver_fp);
+    if (a > b)
+        std::swap(a, b);
+    return a + "|" + b + "|" + std::to_string(seq);
+}
 
 struct AADBuilder
 {
@@ -846,17 +856,5 @@ compute_fingerprint_array(std::span<const unsigned char> pk)
     return fingerprint_sha256(pk);
 }
 
-inline std::string make_symmetric_message_aad(std::string_view sender_fp,
-                                              std::string_view receiver_fp,
-                                              uint32_t         seq)
-{
-    // CRITICAL: AAD must match session key derivation order
-    // Session keys are derived with sorted fingerprints (a < b)
-    // So AAD must also use sorted order, NOT sender/receiver order
-    std::string a(sender_fp);
-    std::string b(receiver_fp);
-    if (a > b)
-        std::swap(a, b);
-    return a + "|" + b + "|" + std::to_string(seq);
-}
+
 #endif

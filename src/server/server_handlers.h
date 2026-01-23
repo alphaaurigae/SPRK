@@ -12,10 +12,23 @@
 #include <unordered_map>
 #include <vector>
 
+struct ParsedView
+{
+    const Parsed *v{};
+    explicit ParsedView(const Parsed &p) noexcept : v(&p) {}
+};
+
+struct FrameView
+{
+    const std::vector<unsigned char> *v{};
+    explicit FrameView(const std::vector<unsigned char> &f) noexcept : v(&f) {}
+};
+
 static void broadcast_hello_to_peers(
     const SessionData &sd, std::shared_ptr<ClientState> sender,
     const std::vector<unsigned char> &frame,
     const std::unordered_map<std::string, SessionData> & /*sessions*/)
+
 {
     auto ts = get_current_timestamp_ms();
     std::cerr << "[" << ts << "] broadcast_hello_to_peers: peers="
@@ -50,18 +63,25 @@ static void broadcast_hello_to_peers(
 }
 
 inline void
-handle_hello_message(std::shared_ptr<ClientState> client, const Parsed &p,
-                     const std::vector<unsigned char>             &frame,
+handle_hello_message(std::shared_ptr<ClientState> client, ParsedView p,
+                     FrameView                                     frame,
                      std::unordered_map<std::string, SessionData> &sessions)
 {
-    std::cerr << "[" << get_current_timestamp_ms()
-              << "] handle_hello_message: username='" << p.username
-              << "' session_id='" << p.session_id
-              << "' eph_pk_len=" << p.eph_pk.size() << "\n";
+    const Parsed                     &pp = *p.v;
+    const std::vector<unsigned char> &ff = *frame.v;
 
-    std::string uname;
-    std::string sid;
-    std::string error = validate_hello_basics(p, sid, uname);
+    std::cerr << "[" << get_current_timestamp_ms()
+              << "] handle_hello_message: username='" << pp.username
+              << "' session_id='" << pp.session_id
+              << "' eph_pk_len=" << pp.eph_pk.size() << "\n";
+
+    auto basics = HelloBasicsOut::make(HelloBasicsOut::SessionId(pp.session_id),
+                                       HelloBasicsOut::UserName(pp.username));
+
+    std::string error = validate_hello_basics(pp, basics);
+
+    std::string &sid   = basics.sid;
+    std::string &uname = basics.uname;
 
     if (!error.empty())
     {
@@ -78,13 +98,18 @@ handle_hello_message(std::shared_ptr<ClientState> client, const Parsed &p,
     client->session_id = sid;
     client->username   = uname;
     client->fingerprint_hex =
-        p.identity_pk.empty() ? "" : compute_fingerprint_hex(p.identity_pk);
+        pp.identity_pk.empty() ? "" : compute_fingerprint_hex(pp.identity_pk);
 
     cleanup_old_nickname(sd, client, uname);
-    register_client(sd, client, uname, frame, p);
 
-    if (!p.identity_pk.empty())
-        sd.hello_message_by_fingerprint[client->fingerprint_hex] = frame;
+    auto data = ClientRegistrationData::make(
+        ClientRegistrationData::Uname(uname), ClientRegistrationData::Frame(ff),
+        ClientRegistrationData::ParsedMsg(pp));
+
+    register_client(sd, client, data);
+
+    if (!pp.identity_pk.empty())
+        sd.hello_message_by_fingerprint[client->fingerprint_hex] = ff;
 
     std::cerr << "[" << get_current_timestamp_ms() << "] connect " << uname
               << " session=" << sid << "\n";
@@ -94,7 +119,7 @@ handle_hello_message(std::shared_ptr<ClientState> client, const Parsed &p,
               << "'s hello to " << (sd.clients_by_nick.size() - 1)
               << " peers\n";
 
-    broadcast_hello_to_peers(sd, client, frame, sessions);
+    broadcast_hello_to_peers(sd, client, ff, sessions);
 
     for (const auto &kv : sd.hello_message_by_fingerprint)
     {
@@ -144,13 +169,15 @@ handle_hello_message(std::shared_ptr<ClientState> client, const Parsed &p,
 }
 
 inline void
-handle_chat_message(std::shared_ptr<ClientState> client, const Parsed &p,
-                    const std::vector<unsigned char>             &frame,
+handle_chat_message(std::shared_ptr<ClientState> client, ParsedView p,
+                    FrameView                                     frame,
                     std::unordered_map<std::string, SessionData> &sessions)
 {
+    const Parsed &pp = *p.v;
+
     std::cerr << "[" << get_current_timestamp_ms()
-              << "] handle_chat_message: from='" << p.from << "' to='" << p.to
-              << "' seq=" << p.seq << "\n";
+              << "] handle_chat_message: from='" << pp.from << "' to='" << pp.to
+              << "' seq=" << pp.seq << "\n";
 
     if (client->session_id.empty())
         return;
@@ -162,11 +189,12 @@ handle_chat_message(std::shared_ptr<ClientState> client, const Parsed &p,
     SessionData                 &sd = sess_it->second;
     std::shared_ptr<ClientState> dst;
 
-    if (auto it = sd.clients_by_nick.find(p.to); it != sd.clients_by_nick.end())
+    if (auto it = sd.clients_by_nick.find(pp.to);
+        it != sd.clients_by_nick.end())
         dst = it->second;
-    else if (p.to.size() >= 4)
+    else if (pp.to.size() >= 4)
     {
-        std::string lower = p.to;
+        std::string lower = pp.to;
         std::ranges::transform(lower, lower.begin(), [](unsigned char c)
                                { return static_cast<char>(std::tolower(c)); });
 
@@ -190,7 +218,7 @@ handle_chat_message(std::shared_ptr<ClientState> client, const Parsed &p,
     if (dst)
     {
         auto frame_copy =
-            std::make_shared<const std::vector<unsigned char>>(frame);
+            std::make_shared<const std::vector<unsigned char>>(*frame.v);
         async_write_frame(
             dst->stream, frame_copy,
             [](const std::error_code &ec, std::size_t)

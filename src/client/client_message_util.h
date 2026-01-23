@@ -1,3 +1,4 @@
+// client_message_util.h
 #ifndef CLIENT_MESSAGE_UTIL_H
 #define CLIENT_MESSAGE_UTIL_H
 
@@ -124,31 +125,64 @@ inline void process_pubkey_response(const Parsed &p)
     std::cout << "pubkey " << p.username << " " << hexpk << "\n";
 }
 
-inline std::optional<std::string>
-validate_and_compute_peer_key(const Parsed &p, std::string &peer_fp_hex,
-                              const std::string &peer_name, uint64_t ms)
+struct PeerFpHexOut
 {
-    const auto key_opt = compute_peer_key(p, peer_fp_hex);
+    std::string &v;
+    explicit PeerFpHexOut(std::string &ref) noexcept : v(ref) {}
+};
+
+struct PeerNameIn
+{
+    std::string_view v{};
+    explicit PeerNameIn(std::string_view s) noexcept : v(s) {}
+};
+
+inline std::optional<std::string>
+validate_and_compute_peer_key(const Parsed &p, PeerFpHexOut peer_fp_hex,
+                              PeerNameIn peer_name, MsU ms)
+{
+    const auto key_opt = compute_peer_key(p, peer_fp_hex.v);
     if (!key_opt.has_value())
     {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: hello without identity_pk from " + peer_name);
+        dev_println("[" + std::to_string(ms.v) +
+                    "] REJECTED: hello without identity_pk from " +
+                    std::string(peer_name.v));
         return std::nullopt;
     }
     return key_opt;
 }
 
-inline bool
-update_peer_state(PeerInfo &pi, const Parsed &p, const std::string &peer_name,
-                  const std::string &peer_key, const std::string &peer_fp_hex,
-                  std::unordered_set<std::string> &fps_set, uint64_t ms)
+struct PeerKeyIn
 {
-    update_peer_info(pi, PeerNameStr{peer_name}, PeerFpHexStr{peer_fp_hex},
-                     fps_set);
+    std::string_view v{};
+    explicit PeerKeyIn(std::string_view s) noexcept : v(s) {}
+};
 
-    if (!check_peer_limits(PeerKeyView{peer_key}, MsU{ms}))
+struct PeerFpHexIn
+{
+    std::string_view v{};
+    explicit PeerFpHexIn(std::string_view s) noexcept : v(s) {}
+};
+
+struct FpsSetRef
+{
+    std::unordered_set<std::string> &v;
+    explicit FpsSetRef(std::unordered_set<std::string> &ref) noexcept : v(ref)
+    {
+    }
+};
+
+inline bool update_peer_state(PeerInfo &pi, const Parsed &p,
+                              PeerNameIn peer_name, PeerKeyIn peer_key,
+                              PeerFpHexIn peer_fp_hex, FpsSetRef fps_set,
+                              MsU ms)
+{
+    update_peer_info(pi, PeerNameStr{peer_name.v}, PeerFpHexStr{peer_fp_hex.v},
+                     fps_set.v);
+
+    if (!check_peer_limits(PeerKeyView{peer_key.v}, ms))
         return false;
-    if (!check_rate_and_signature(pi, p, PeerNameView{peer_name}, MsU{ms}))
+    if (!check_rate_and_signature(pi, p, PeerNameView{peer_name.v}, ms))
         return false;
 
     bool       pk_changed     = false;
@@ -156,25 +190,37 @@ update_peer_state(PeerInfo &pi, const Parsed &p, const std::string &peer_name,
     const bool needs_key_handling =
         detect_key_changes(pi, p, pk_changed, has_new_encaps);
     if (pk_changed)
-        handle_rekey(pi, PeerNameStr{peer_name}, MsU{ms});
+        handle_rekey(pi, PeerNameStr{peer_name.v}, ms);
     if (!needs_key_handling && pi.ready)
         return false;
 
-    update_keys_and_log_connect(pi, p, PeerNameStr{peer_name}, MsU{ms});
+    update_keys_and_log_connect(pi, p, PeerNameStr{peer_name.v}, ms);
     return true;
 }
 
-inline std::string build_key_context_for_session(const std::string &peer_fp_hex,
-                                                 const std::string &session_id)
+struct SessionIdIn
+{
+    std::string_view v{};
+    explicit SessionIdIn(std::string_view s) noexcept : v(s) {}
+};
+
+inline std::string build_key_context_for_session(PeerFpHexIn peer_fp_hex,
+                                                 SessionIdIn session_id)
 {
     return build_key_context_for_peer(
         KeyContextParams::make(KeyContextParams::MyFP{my_fp_hex},
-                               KeyContextParams::PeerFP{peer_fp_hex},
-                               KeyContextParams::SessionID{session_id}));
+                               KeyContextParams::PeerFP{peer_fp_hex.v},
+                               KeyContextParams::SessionID{session_id.v}));
 }
 
 namespace detail
 {
+struct KeyContextIn
+{
+    std::string_view v{};
+    explicit KeyContextIn(std::string_view s) noexcept : v(s) {}
+};
+
 inline void maybe_send_list_request(const Parsed &p)
 {
     if (!p.encaps.empty())
@@ -190,37 +236,49 @@ inline void maybe_send_list_request(const Parsed &p)
     }
 }
 
-inline void handle_ready_state(const Parsed &p, const std::string &peer_name,
-                               PeerInfo &pi, bool was_ready, uint64_t ms)
+struct WasReadyFlag
 {
-    if (!was_ready && pi.ready)
+    bool v{};
+    explicit WasReadyFlag(bool x) noexcept : v(x) {}
+};
+
+inline void handle_ready_state(const Parsed &p, PeerNameIn peer_name,
+                               PeerInfo &pi, WasReadyFlag was_ready, MsU ms)
+{
+    if (!was_ready.v && pi.ready)
     {
-        std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
+        std::cout << "[" << ms.v << "] peer " << std::string(peer_name.v)
+                  << " ready\n";
         maybe_send_list_request(p);
     }
 }
 
-inline bool process_peer_encaps(const Parsed &p, const std::string &peer_name,
-                                PeerInfo &pi, const std::string &key_context,
-                                const ExpectedLengths &expected, bool initiator,
-                                uint64_t ms)
+struct InitiatorFlag
+{
+    bool v{};
+    explicit InitiatorFlag(bool x) noexcept : v(x) {}
+};
+
+inline bool process_peer_encaps(const Parsed &p, PeerNameIn peer_name,
+                                PeerInfo &pi, KeyContextIn key_context,
+                                const ExpectedLengths &expected,
+                                InitiatorFlag initiator, MsU ms)
 {
     const bool was_ready = pi.ready;
 
-    if (!p.encaps.empty() || (initiator && !pi.sent_hello))
+    if (!p.encaps.empty() || (initiator.v && !pi.sent_hello))
     {
         const bool handled =
-            initiator
-                ? try_handle_initiator_encaps(pi, p, PeerNameView{peer_name},
-                                              KeyContextView{key_context},
-                                              MsS{static_cast<int64_t>(ms)})
-                : handle_encaps_present(pi, p, PeerNameView{peer_name},
-                                        KeyContextView{key_context},
-                                        ExpectedCtLen{expected.ct_len},
-                                        MsU{ms});
+            initiator.v
+                ? try_handle_initiator_encaps(pi, p, PeerNameView{peer_name.v},
+                                              KeyContextView{key_context.v},
+                                              MsS{static_cast<int64_t>(ms.v)})
+                : handle_encaps_present(pi, p, PeerNameView{peer_name.v},
+                                        KeyContextView{key_context.v},
+                                        ExpectedCtLen{expected.ct_len}, ms);
 
         if (handled)
-            handle_ready_state(p, peer_name, pi, was_ready, ms);
+            handle_ready_state(p, peer_name, pi, WasReadyFlag{was_ready}, ms);
 
         return handled;
     }
@@ -244,8 +302,8 @@ inline void handle_hello(const Parsed &p)
     const std::lock_guard<std::mutex> lk(peers_mtx);
 
     std::string peer_fp_hex;
-    const auto  peer_key_opt =
-        validate_and_compute_peer_key(p, peer_fp_hex, peer_name, ms);
+    const auto  peer_key_opt = validate_and_compute_peer_key(
+        p, PeerFpHexOut{peer_fp_hex}, PeerNameIn{peer_name}, MsU{ms});
     if (!peer_key_opt.has_value())
         return;
     const std::string peer_key = peer_key_opt.value();
@@ -253,8 +311,9 @@ inline void handle_hello(const Parsed &p)
     auto &pi      = peers[peer_key];
     auto &fps_set = fps_by_username[peer_name];
 
-    if (!update_peer_state(pi, p, peer_name, peer_key, peer_fp_hex, fps_set,
-                           ms))
+    if (!update_peer_state(pi, p, PeerNameIn{peer_name}, PeerKeyIn{peer_key},
+                           PeerFpHexIn{peer_fp_hex}, FpsSetRef{fps_set},
+                           MsU{ms}))
         return;
 
     ExpectedLengths expected{};
@@ -265,13 +324,14 @@ inline void handle_hello(const Parsed &p)
                                 ExpectedPkLen{expected.pk_len}, MsU{ms}))
         return;
 
-    const std::string key_context =
-        build_key_context_for_session(peer_fp_hex, p.session_id);
+    const std::string key_context = build_key_context_for_session(
+        PeerFpHexIn{peer_fp_hex}, SessionIdIn{p.session_id});
     const bool i_am_initiator =
         !peer_fp_hex.empty() && (my_fp_hex < peer_fp_hex);
 
-    if (!detail::process_peer_encaps(p, peer_name, pi, key_context, expected,
-                                     i_am_initiator, ms))
+    if (!detail::process_peer_encaps(
+            p, PeerNameIn{peer_name}, pi, detail::KeyContextIn{key_context},
+            expected, detail::InitiatorFlag{i_am_initiator}, MsU{ms}))
     {
         if (!i_am_initiator)
         {
@@ -286,19 +346,25 @@ inline void handle_hello(const Parsed &p)
     }
 }
 
-inline std::optional<PeerInfo *>
-validate_peer(const Parsed &p, const std::string &peer_from, uint64_t ms)
+struct PeerFromIn
 {
-    if (!validate_username(PeerNameView{peer_from}, MsU{ms})) [[unlikely]]
+    std::string_view v{};
+    explicit PeerFromIn(std::string_view s) noexcept : v(s) {}
+};
+
+inline std::optional<PeerInfo *> validate_peer(const Parsed &p,
+                                               PeerFromIn peer_from, MsU ms)
+{
+    if (!validate_username(PeerNameView{peer_from.v}, ms)) [[unlikely]]
     {
-        dev_println("[" + std::to_string(ms) +
+        dev_println("[" + std::to_string(ms.v) +
                     "] REJECTED: invalid sender username");
         return std::nullopt;
     }
 
     if (p.identity_pk.empty()) [[unlikely]]
     {
-        dev_println("[" + std::to_string(ms) +
+        dev_println("[" + std::to_string(ms.v) +
                     "] REJECTED: chat without sender fingerprint");
         return std::nullopt;
     }
@@ -307,7 +373,7 @@ validate_peer(const Parsed &p, const std::string &peer_from, uint64_t ms)
     auto       it       = peers.find(peer_key);
     if (it == peers.end()) [[unlikely]]
     {
-        dev_println("[" + std::to_string(ms) +
+        dev_println("[" + std::to_string(ms.v) +
                     "] REJECTED: peer not found for key " + peer_key);
         return std::nullopt;
     }
@@ -316,15 +382,16 @@ validate_peer(const Parsed &p, const std::string &peer_from, uint64_t ms)
 
     if (!pi.ready) [[unlikely]]
     {
-        dev_println("[" + std::to_string(ms) + "] REJECTED: peer " + peer_from +
-                    " not ready");
+        dev_println("[" + std::to_string(ms.v) + "] REJECTED: peer " +
+                    std::string(peer_from.v) + " not ready");
         return std::nullopt;
     }
 
     if (!check_rate_limit(pi)) [[unlikely]]
     {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: rate limit exceeded for " + peer_from);
+        dev_println("[" + std::to_string(ms.v) +
+                    "] REJECTED: rate limit exceeded for " +
+                    std::string(peer_from.v));
         return std::nullopt;
     }
 
@@ -340,50 +407,64 @@ inline std::string compute_sender_fp_hex(const PeerInfo &pi)
     return fingerprint_to_hex(fp);
 }
 
-inline std::vector<unsigned char>
-build_aad_seq(const std::string &sender_fp_hex, uint64_t seq)
+struct SenderFpHexIn
+{
+    std::string_view v{};
+    explicit SenderFpHexIn(std::string_view s) noexcept : v(s) {}
+};
+
+struct SeqU64
+{
+    uint64_t v{};
+    explicit SeqU64(uint64_t x) noexcept : v(x) {}
+};
+
+inline std::vector<unsigned char> build_aad_seq(SenderFpHexIn sender_fp_hex,
+                                                SeqU64        seq)
 {
     const std::string aad_s =
-        AADBuilder{my_fp_hex, sender_fp_hex}.build_for_seq(seq);
+        AADBuilder{my_fp_hex, std::string(sender_fp_hex.v)}.build_for_seq(
+            seq.v);
     return std::vector<unsigned char>(aad_s.begin(), aad_s.end());
 }
 
-inline bool handle_sequence(PeerInfo &pi, uint64_t seq, uint64_t ms,
-                            const std::string &peer_from)
+inline bool handle_sequence(PeerInfo &pi, SeqU64 seq, MsU ms,
+                            PeerFromIn peer_from)
 {
-    if (is_replay_attack(seq, pi.recv_seq)) [[unlikely]]
+    if (is_replay_attack(seq.v, pi.recv_seq)) [[unlikely]]
     {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: replay attack from " + peer_from + " seq=" +
-                    std::to_string(seq) + " < " + std::to_string(pi.recv_seq));
+        dev_println("[" + std::to_string(ms.v) +
+                    "] REJECTED: replay attack from " +
+                    std::string(peer_from.v) + " seq=" + std::to_string(seq.v) +
+                    " < " + std::to_string(pi.recv_seq));
         return false;
     }
 
-    if (!is_sequence_gap_valid(seq, pi.recv_seq, DEFAULT_MAX_SEQ_GAP,
+    if (!is_sequence_gap_valid(seq.v, pi.recv_seq, DEFAULT_MAX_SEQ_GAP,
                                DEFAULT_SEQ_JITTER_BUFFER)) [[unlikely]]
     {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: seq gap too large from " + peer_from +
-                    " got=" + std::to_string(seq) +
+        dev_println("[" + std::to_string(ms.v) +
+                    "] REJECTED: seq gap too large from " +
+                    std::string(peer_from.v) + " got=" + std::to_string(seq.v) +
                     " expected=" + std::to_string(pi.recv_seq));
         return false;
     }
 
     const bool jitter_detected = is_sequence_in_jitter_range(
-        seq, pi.recv_seq, DEFAULT_SEQ_JITTER_BUFFER);
+        seq.v, pi.recv_seq, DEFAULT_SEQ_JITTER_BUFFER);
     if (jitter_detected) [[unlikely]]
     {
-        dev_println("[" + std::to_string(ms) +
-                    "] WARNING: jitter detected from " + peer_from +
-                    " got=" + std::to_string(seq) +
+        dev_println("[" + std::to_string(ms.v) +
+                    "] WARNING: jitter detected from " +
+                    std::string(peer_from.v) + " got=" + std::to_string(seq.v) +
                     " expected=" + std::to_string(pi.recv_seq));
-        pi.recv_seq = seq;
+        pi.recv_seq = seq.v;
     }
-    else if (seq != pi.recv_seq) [[unlikely]]
+    else if (seq.v != pi.recv_seq) [[unlikely]]
     {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: seq mismatch from " + peer_from +
-                    " got=" + std::to_string(seq) +
+        dev_println("[" + std::to_string(ms.v) +
+                    "] REJECTED: seq mismatch from " +
+                    std::string(peer_from.v) + " got=" + std::to_string(seq.v) +
                     " expected=" + std::to_string(pi.recv_seq));
         return false;
     }
@@ -399,7 +480,7 @@ inline void handle_chat(const Parsed &p)
     std::cerr << "[" << ms << "] handle_chat: from=" << peer_from
               << " seq=" << p.seq << " ct_len=" << p.ciphertext.size() << "\n";
 
-    auto pi_opt = validate_peer(p, peer_from, ms);
+    auto pi_opt = validate_peer(p, PeerFromIn{peer_from}, MsU{ms});
     if (!pi_opt)
         return;
     PeerInfo *pi = *pi_opt;
@@ -409,13 +490,15 @@ inline void handle_chat(const Parsed &p)
         dev_println("[" + std::to_string(ms) +
                     "] WARNING: large time gap from " + peer_from);
 
-    if (!handle_sequence(*pi, p.seq, ms, peer_from)) [[unlikely]]
+    if (!handle_sequence(*pi, SeqU64{p.seq}, MsU{ms}, PeerFromIn{peer_from}))
+        [[unlikely]]
         return;
 
     try
     {
         const std::string sender_fp_hex = compute_sender_fp_hex(*pi);
-        const auto        aad           = build_aad_seq(sender_fp_hex, p.seq);
+        const auto        aad =
+            build_aad_seq(SenderFpHexIn{sender_fp_hex}, SeqU64{p.seq});
 
         const auto pt = aead_decrypt(pi->sk.key, p.ciphertext, aad, p.nonce);
         if (pt.empty()) [[unlikely]]

@@ -115,19 +115,25 @@ static bool wait_backoff(uint32_t reconnect_attempts)
     return true;
 }
 
+struct EphKeyPair
+{
+  public:
+    secure_vector pk{};
+    secure_vector sk{};
+};
+
 static bool attempt_connection(asio::io_context       &io,
-                               const ConnectionConfig &config,
-                               secure_vector          &persisted_eph_pk,
-                               secure_vector          &persisted_eph_sk,
-                               bool                    have_persisted_eph)
+                               const ConnectionConfig &config, EphKeyPair &eph,
+                               bool &have_persisted_eph)
+
 {
     std::atomic<bool>       connection_complete{false};
     std::mutex              mtx;
     std::condition_variable cv;
 
     attempt_connection_async(io, ServerStr{config.server}, PortInt{config.port},
-                             persisted_eph_pk, persisted_eph_sk,
-                             have_persisted_eph,
+                             PersistedEphPk{eph.pk}, PersistedEphSk{eph.sk},
+                             HavePersistedEph{have_persisted_eph},
                              [&connection_complete, &cv](bool success)
                              {
                                  if (success)
@@ -151,10 +157,8 @@ static void handle_post_connection()
 }
 
 static void run_reconnect_loop(asio::io_context       &io,
-                               const ConnectionConfig &config,
-                               secure_vector          &persisted_eph_pk,
-                               secure_vector          &persisted_eph_sk,
-                               bool                    have_persisted_eph)
+                               const ConnectionConfig &config, EphKeyPair &eph,
+                               bool &have_persisted_eph)
 {
     uint32_t reconnect_attempts = 0;
 
@@ -162,8 +166,7 @@ static void run_reconnect_loop(asio::io_context       &io,
     {
         wait_backoff(reconnect_attempts);
 
-        if (!attempt_connection(io, config, persisted_eph_pk, persisted_eph_sk,
-                                have_persisted_eph))
+        if (!attempt_connection(io, config, eph, have_persisted_eph))
         {
             ++reconnect_attempts;
             continue;
@@ -224,17 +227,15 @@ try
         return 1;
     }
 
-    secure_vector persisted_eph_pk;
-    secure_vector persisted_eph_sk;
-    bool          have_persisted_eph = false;
+    bool have_persisted_eph = false;
 
     auto io_work = asio::require(io.get_executor(),
                                  asio::execution::outstanding_work.tracked);
 
     std::thread io_thread = start_io_thread(io, std::move(io_work));
 
-    run_reconnect_loop(io, config, persisted_eph_pk, persisted_eph_sk,
-                       have_persisted_eph);
+    EphKeyPair eph;
+    run_reconnect_loop(io, config, eph, have_persisted_eph);
 
     close_ssl_stream_if_any();
 

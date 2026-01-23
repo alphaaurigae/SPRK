@@ -1,3 +1,4 @@
+// client_session.h
 #ifndef CLIENT_SESSION_H
 #define CLIENT_SESSION_H
 
@@ -38,6 +39,24 @@ struct PortInt
     explicit PortInt(int x) noexcept : v(x) {}
 };
 
+struct PersistedEphPk
+{
+    secure_vector &v;
+    explicit PersistedEphPk(secure_vector &ref) noexcept : v(ref) {}
+};
+
+struct PersistedEphSk
+{
+    secure_vector &v;
+    explicit PersistedEphSk(secure_vector &ref) noexcept : v(ref) {}
+};
+
+struct HavePersistedEph
+{
+    bool &v;
+    explicit HavePersistedEph(bool &ref) noexcept : v(ref) {}
+};
+
 inline bool setup_session_id(std::span<char *> args)
 {
     std::string_view session_flag = "--sessionid";
@@ -64,25 +83,27 @@ inline bool setup_session_id(std::span<char *> args)
     return true;
 }
 
-inline void attempt_connection_async(
-    asio::io_context &io, ServerStr server, PortInt port,
-    secure_vector &persisted_eph_pk, secure_vector &persisted_eph_sk,
-    bool &have_persisted_eph, std::function<void(bool)> completion_handler)
+inline void
+attempt_connection_async(asio::io_context &io, ServerStr server, PortInt port,
+                         PersistedEphPk            persisted_eph_pk,
+                         PersistedEphSk            persisted_eph_sk,
+                         HavePersistedEph          have_persisted_eph,
+                         std::function<void(bool)> completion_handler)
 {
     std::cout << "[" << get_current_timestamp_ms()
               << "] attempting connection to " << std::string(server.v) << ":"
               << port.v << "\n";
 
-    if (!have_persisted_eph)
+    if (!have_persisted_eph.v)
     {
-        const auto [pk, sk] = pqkem_keypair(KEM_ALG_NAME);
-        persisted_eph_pk    = pk;
-        persisted_eph_sk    = sk;
-        have_persisted_eph  = true;
+        const auto [pk, sk]  = pqkem_keypair(KEM_ALG_NAME);
+        persisted_eph_pk.v   = pk;
+        persisted_eph_sk.v   = sk;
+        have_persisted_eph.v = true;
     }
 
-    my_eph_pk = persisted_eph_pk;
-    my_eph_sk = persisted_eph_sk;
+    my_eph_pk = persisted_eph_pk.v;
+    my_eph_sk = persisted_eph_sk.v;
 
     async_connect_to_host_asio(
         io, std::string(server.v).c_str(), port.v,

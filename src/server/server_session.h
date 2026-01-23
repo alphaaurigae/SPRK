@@ -28,23 +28,50 @@ struct SessionData
 };
 
 // Returns empty string on success, error message on failure
-static std::string validate_hello_basics(const Parsed &p, std::string &sid,
-                                         std::string &uname)
+struct HelloBasicsOut
 {
-    uname = trim(p.username);
-    sid   = trim(p.session_id);
+  public:
+    std::string sid{};
+    std::string uname{};
+
+    struct SessionId
+    {
+        std::string_view v{};
+        explicit SessionId(std::string_view s) noexcept : v(s) {}
+    };
+
+    struct UserName
+    {
+        std::string_view v{};
+        explicit UserName(std::string_view s) noexcept : v(s) {}
+    };
+
+    static HelloBasicsOut make(SessionId s, UserName u)
+    {
+        return HelloBasicsOut(s, u);
+    }
+
+    HelloBasicsOut() = delete;
+
+  private:
+    explicit HelloBasicsOut(SessionId s, UserName u) : sid(s.v), uname(u.v) {}
+};
+static std::string validate_hello_basics(const Parsed &p, HelloBasicsOut &out)
+{
+    out.uname = trim(p.username);
+    out.sid   = trim(p.session_id);
 
     std::cerr << "[" << get_current_timestamp_ms()
-              << "] validate_hello_basics: username='" << uname
-              << "' session_id_len=" << sid.size()
+              << "] validate_hello_basics: username='" << out.uname
+              << "' session_id_len=" << out.sid.size()
               << " id_alg=" << static_cast<int>(p.id_alg)
               << " eph_pk_len=" << p.eph_pk.size()
               << " signature_len=" << p.signature.size() << "\n";
 
-    if (sid.empty())
+    if (out.sid.empty())
     {
-        sid = std::string(reinterpret_cast<const char *>(p.eph_pk.data()),
-                          p.eph_pk.size());
+        out.sid = std::string(reinterpret_cast<const char *>(p.eph_pk.data()),
+                              p.eph_pk.size());
         std::cerr
             << "[" << get_current_timestamp_ms()
             << "] validate_hello_basics: generated session id from eph_pk, len="
@@ -63,7 +90,7 @@ static std::string validate_hello_basics(const Parsed &p, std::string &sid,
     sig_data.insert(sig_data.end(), p.eph_pk.begin(), p.eph_pk.end());
     sig_data.insert(sig_data.end(), p.session_id.begin(), p.session_id.end());
 
-    bool sig_ok =
+    const bool sig_ok =
         (p.id_alg == ALGO_MLDSA87) &&
         pqsig_verify(SIG_ALG_NAME, p.identity_pk, sig_data, p.signature);
 
@@ -76,9 +103,8 @@ static std::string validate_hello_basics(const Parsed &p, std::string &sid,
 
     std::cerr << "[" << get_current_timestamp_ms()
               << "] validate_hello_basics: ok\n";
-    return {}; // empty string = success
+    return {};
 }
-
 static void cleanup_old_nickname(SessionData                 &sd,
                                  std::shared_ptr<ClientState> client,
                                  const std::string           &new_uname)
@@ -127,25 +153,63 @@ static bool check_username_conflicts(SessionData &sd, const std::string &uname,
     return true; // username is acceptable
 }
 
-static void register_client(SessionData                      &sd,
-                            std::shared_ptr<ClientState>      client,
-                            const std::string                &uname,
-                            const std::vector<unsigned char> &frame,
-                            const Parsed                     &p)
+struct ClientRegistrationData
 {
+  public:
+    std::string                uname{};
+    std::vector<unsigned char> frame{};
+    Parsed                     p{};
+
+    struct Uname
+    {
+        std::string_view v{};
+        explicit Uname(std::string_view s) noexcept : v(s) {}
+    };
+
+    struct Frame
+    {
+        const std::vector<unsigned char> *v{};
+        explicit Frame(const std::vector<unsigned char> &f) noexcept : v(&f) {}
+    };
+
+    struct ParsedMsg
+    {
+        const Parsed *v{};
+        explicit ParsedMsg(const Parsed &p_) noexcept : v(&p_) {}
+    };
+
+    static ClientRegistrationData make(Uname u, Frame f, ParsedMsg p_)
+    {
+        return ClientRegistrationData(u, f, p_);
+    }
+
+    ClientRegistrationData() = delete;
+
+  private:
+    explicit ClientRegistrationData(Uname u, Frame f, ParsedMsg p_)
+        : uname(u.v), frame(*f.v), p(*p_.v)
+    {
+    }
+};
+
+static void register_client(SessionData                  &sd,
+                            std::shared_ptr<ClientState>  client,
+                            const ClientRegistrationData &data)
+{
+    const auto &uname = data.uname;
+    const auto &frame = data.frame;
+    const auto &p     = data.p;
+
     std::cerr << "[" << get_current_timestamp_ms()
               << "] register_client: uname='" << uname
               << "' fp_present=" << (!p.identity_pk.empty())
               << " frame_len=" << frame.size() << "\n";
 
-    // Compute fingerprint if identity key present
     std::string fp_hex =
         p.identity_pk.empty() ? "" : compute_fingerprint_hex(p.identity_pk);
 
-    // Always register nickname
     sd.clients_by_nick[uname] = client;
 
-    // Register identity/fingerprint data if present
     if (!fp_hex.empty())
     {
         sd.clients_by_fingerprint[fp_hex]       = client;

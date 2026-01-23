@@ -114,12 +114,14 @@ start_client_session(std::shared_ptr<ClientState>                  client,
                 case MsgType::MSG_HELLO:
                     std::cerr << "[" << get_current_timestamp_ms()
                               << "] dispatch: MSG_HELLO\n";
-                    handle_hello_message(client, p, frame, sessions);
+                    handle_hello_message(client, ParsedView(p),
+                                         FrameView(frame), sessions);
                     break;
                 case MsgType::MSG_CHAT:
                     std::cerr << "[" << get_current_timestamp_ms()
                               << "] dispatch: MSG_CHAT to=" << p.to << "\n";
-                    handle_chat_message(client, p, frame, sessions);
+                    handle_chat_message(client, ParsedView(p), FrameView(frame),
+                                        sessions);
                     break;
                 case MSG_LIST_REQUEST:
                     std::cerr << "[" << get_current_timestamp_ms()

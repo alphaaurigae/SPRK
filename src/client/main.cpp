@@ -108,26 +108,26 @@ static bool wait_backoff(uint32_t reconnect_attempts)
         INITIAL_BACKOFF_MS * (1ULL << (reconnect_attempts - 1)),
         MAX_BACKOFF_MS);
 
-    std::cout << "[" << get_current_timestamp_ms()
-              << "] reconnecting in " << backoff << "ms (attempt "
-              << reconnect_attempts + 1 << ")\n";
+    std::cout << "[" << get_current_timestamp_ms() << "] reconnecting in "
+              << backoff << "ms (attempt " << reconnect_attempts + 1 << ")\n";
 
     std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
     return true;
 }
 
-static bool attempt_connection(asio::io_context &io,
+static bool attempt_connection(asio::io_context       &io,
                                const ConnectionConfig &config,
-                               secure_vector &persisted_eph_pk,
-                               secure_vector &persisted_eph_sk,
-                               bool have_persisted_eph)
+                               secure_vector          &persisted_eph_pk,
+                               secure_vector          &persisted_eph_sk,
+                               bool                    have_persisted_eph)
 {
-    std::atomic<bool> connection_complete{false};
-    std::mutex mtx;
+    std::atomic<bool>       connection_complete{false};
+    std::mutex              mtx;
     std::condition_variable cv;
 
     attempt_connection_async(io, ServerStr{config.server}, PortInt{config.port},
-                             persisted_eph_pk, persisted_eph_sk, have_persisted_eph,
+                             persisted_eph_pk, persisted_eph_sk,
+                             have_persisted_eph,
                              [&connection_complete, &cv](bool success)
                              {
                                  if (success)
@@ -150,11 +150,11 @@ static void handle_post_connection()
     reset_peers_state();
 }
 
-static void run_reconnect_loop(asio::io_context &io,
+static void run_reconnect_loop(asio::io_context       &io,
                                const ConnectionConfig &config,
-                               secure_vector &persisted_eph_pk,
-                               secure_vector &persisted_eph_sk,
-                               bool have_persisted_eph)
+                               secure_vector          &persisted_eph_pk,
+                               secure_vector          &persisted_eph_sk,
+                               bool                    have_persisted_eph)
 {
     uint32_t reconnect_attempts = 0;
 
@@ -162,7 +162,8 @@ static void run_reconnect_loop(asio::io_context &io,
     {
         wait_backoff(reconnect_attempts);
 
-        if (!attempt_connection(io, config, persisted_eph_pk, persisted_eph_sk, have_persisted_eph))
+        if (!attempt_connection(io, config, persisted_eph_pk, persisted_eph_sk,
+                                have_persisted_eph))
         {
             ++reconnect_attempts;
             continue;
@@ -183,8 +184,8 @@ int main(int argc, char **argv) noexcept
 try
 {
     const std::span<char *> args(argv, static_cast<std::size_t>(argc));
-    const auto config = parse_command_line_args(args);
-    my_username       = config.username;
+    const auto              config = parse_command_line_args(args);
+    my_username                    = config.username;
 
     std::signal(SIGPIPE, SIG_IGN);
 

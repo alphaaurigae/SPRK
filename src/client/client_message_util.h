@@ -12,6 +12,7 @@
 #include "shared_net_rekey_util.h"
 #include "shared_net_tls_frame_io.h"
 
+
 #include <algorithm>
 #include <array>
 #include <asio/io_context.hpp>
@@ -22,9 +23,11 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <string>
 #include <unordered_set>
 #include <vector>
+#include <set>
+#include <string>
+#include <optional>
 
 struct RecipientFP;
 
@@ -122,154 +125,114 @@ inline void process_pubkey_response(const Parsed &p)
     std::cout << "pubkey " << p.username << " " << hexpk << "\n";
 }
 
-inline void handle_hello(const Parsed &p)
-{
-    const std::string peer_name = trim(p.username);
-    std::cerr << "[" << get_current_timestamp_ms() << "] handle_hello: from='"
-              << peer_name << "' eph_pk_len=" << p.eph_pk.size()
-              << " encaps_len=" << p.encaps.size() << "\n";
-
-    const auto ms = get_current_timestamp_ms();
-    if (!validate_username(PeerNameView{peer_name}, MsU{ms}))
-        return;
-
-    const std::lock_guard<std::mutex> lk(peers_mtx);
-    std::string                       peer_fp_hex;
-    const auto peer_key_opt = compute_peer_key(p, peer_fp_hex);
-    if (!peer_key_opt.has_value())
-    {
-        dev_println("[" + std::to_string(ms) +
-                    "] REJECTED: hello without identity_pk from " + peer_name);
-        return;
+inline std::optional<std::string> validate_and_compute_peer_key(const Parsed &p,
+                                                                std::string &peer_fp_hex,
+                                                                const std::string &peer_name,
+                                                                uint64_t ms) {
+    const auto key_opt = compute_peer_key(p, peer_fp_hex);
+    if (!key_opt.has_value()) {
+        dev_println("[" + std::to_string(ms) + "] REJECTED: hello without identity_pk from " + peer_name);
+        return std::nullopt;
     }
-    const std::string peer_key = peer_key_opt.value();
-    std::cerr << "[" << ms << "] handle_hello: computed peer_key prefix="
-              << (peer_key.size() ? peer_key.substr(0, std::min<size_t>(
-                                                           peer_key.size(), 16))
-                                  : "(empty)")
-              << "\n";
+    return key_opt;
+}
 
-    auto &pi      = peers[peer_key];
-    auto &fps_set = fps_by_username[peer_name];
-    update_peer_info(pi, PeerNameStr{peer_name}, PeerFpHexStr{peer_fp_hex},
-                     fps_set);
+inline bool update_peer_state(PeerInfo &pi,
+                              const Parsed &p,
+                              const std::string &peer_name,
+                              const std::string &peer_key,
+                              const std::string &peer_fp_hex,
+                              std::unordered_set<std::string> &fps_set,
+                              uint64_t ms) {
+    update_peer_info(pi, PeerNameStr{peer_name}, PeerFpHexStr{peer_fp_hex}, fps_set);
 
-    if (!check_peer_limits(PeerKeyView{peer_key}, MsU{ms}))
-        return;
-    if (!check_rate_and_signature(pi, p, PeerNameView{peer_name}, MsU{ms}))
-        return;
+    if (!check_peer_limits(PeerKeyView{peer_key}, MsU{ms})) return false;
+    if (!check_rate_and_signature(pi, p, PeerNameView{peer_name}, MsU{ms})) return false;
 
-    bool       pk_changed     = false;
-    bool       has_new_encaps = false;
-    const bool needs_key_handling =
-        detect_key_changes(pi, p, pk_changed, has_new_encaps);
-
-    if (pk_changed)
-        handle_rekey(pi, PeerNameStr{peer_name}, MsU{ms});
-
-    if (!needs_key_handling && pi.ready)
-        return;
+    bool pk_changed = false;
+    bool has_new_encaps = false;
+    const bool needs_key_handling = detect_key_changes(pi, p, pk_changed, has_new_encaps);
+    if (pk_changed) handle_rekey(pi, PeerNameStr{peer_name}, MsU{ms});
+    if (!needs_key_handling && pi.ready) return false;
 
     update_keys_and_log_connect(pi, p, PeerNameStr{peer_name}, MsU{ms});
+    return true;
+}
+
+inline std::string build_key_context_for_session(const std::string &peer_fp_hex,
+                                                 const std::string &session_id) {
+    return build_key_context_for_peer(
+        KeyContextParams::make(
+            KeyContextParams::MyFP{my_fp_hex},
+            KeyContextParams::PeerFP{peer_fp_hex},
+            KeyContextParams::SessionID{session_id}
+        )
+    );
+}
+
+inline void handle_hello(const Parsed &p) {
+    const std::string peer_name = trim(p.username);
+    const uint64_t ms = get_current_timestamp_ms();
+
+    std::cerr << "[" << ms << "] handle_hello: from='" << peer_name
+              << "' eph_pk_len=" << p.eph_pk.size()
+              << " encaps_len=" << p.encaps.size() << "\n";
+
+    if (!validate_username(PeerNameView{peer_name}, MsU{ms})) return;
+
+    const std::lock_guard<std::mutex> lk(peers_mtx);
+
+    std::string peer_fp_hex;
+    const auto peer_key_opt = validate_and_compute_peer_key(p, peer_fp_hex, peer_name, ms);
+    if (!peer_key_opt.has_value()) return;
+    const std::string peer_key = peer_key_opt.value();
+
+    auto &pi = peers[peer_key];
+    auto &fps_set = fps_by_username[peer_name];
+
+    if (!update_peer_state(pi, p, peer_name, peer_key, peer_fp_hex, fps_set, ms)) return;
 
     ExpectedLengths expected{};
-    if (!get_expected_lengths(expected, ms))
-        return;
+    if (!get_expected_lengths(expected, ms)) return;
+    if (!validate_eph_pk_length(p, PeerNameView{peer_name}, ExpectedPkLen{expected.pk_len}, MsU{ms})) return;
 
-    if (!validate_eph_pk_length(p, PeerNameView{peer_name},
-                                ExpectedPkLen{expected.pk_len}, MsU{ms}))
-        return;
+    const std::string key_context = build_key_context_for_session(peer_fp_hex, p.session_id);
+    const bool i_am_initiator = !peer_fp_hex.empty() && (my_fp_hex < peer_fp_hex);
 
-    const std::string key_context = build_key_context_for_peer(
-        KeyContextParams::make(KeyContextParams::MyFP{my_fp_hex},
-                               KeyContextParams::PeerFP{peer_fp_hex},
-                               KeyContextParams::SessionID{p.session_id}));
-
-    const bool was_ready = pi.ready;
-    const bool i_am_initiator =
-        !peer_fp_hex.empty() && (my_fp_hex < peer_fp_hex);
-
-    if (!p.encaps.empty())
-    {
-
-        if (handle_encaps_present(pi, p, PeerNameView{peer_name},
-                                  KeyContextView{key_context},
-                                  ExpectedCtLen{expected.ct_len}, MsU{ms}))
-        {
-            if (!was_ready && pi.ready)
-            {
+    auto handle_peer_encaps = [&](bool initiator) -> bool {
+        const bool was_ready = pi.ready;
+        auto handle_ready_state = [&](bool ready_flag) {
+            if (!was_ready && ready_flag) {
                 std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
-                const std::vector<unsigned char> req{PROTO_VERSION,
-                                                     MSG_LIST_REQUEST};
-                const auto                       frame = build_frame(req);
-                auto                             frame_ptr =
-                    std::make_shared<std::vector<unsigned char>>(frame);
-                std::lock_guard<std::mutex> lk2(ssl_io_mtx);
-                if (ssl_stream)
-                {
-                    async_write_frame(
-                        ssl_stream, frame_ptr,
-                        [frame_ptr](const std::error_code &, std::size_t) {});
-                }
-            }
-        }
-    }
-
-    else if (i_am_initiator && !pi.sent_hello)
-    {
-        if (try_handle_initiator_encaps(pi, p, PeerNameView{peer_name},
-                                        KeyContextView{key_context},
-                                        MsS{static_cast<int64_t>(ms)}))
-        {
-            if (!was_ready && pi.ready)
-            {
-                std::cout << "[" << ms << "] peer " << peer_name << " ready\n";
-            }
-        }
-    }
-
-    else if (!i_am_initiator)
-    {
-        if (!p.encaps.empty())
-        {
-            if (handle_encaps_present(pi, p, PeerNameView{peer_name},
-                                      KeyContextView{key_context},
-                                      ExpectedCtLen{expected.ct_len}, MsU{ms}))
-            {
-                if (!was_ready && pi.ready)
-                {
-                    std::cout << "[" << ms << "] peer " << peer_name
-                              << " ready\n";
-                    const std::vector<unsigned char> req{PROTO_VERSION,
-                                                         MSG_LIST_REQUEST};
-                    const auto                       frame = build_frame(req);
-                    auto                             frame_ptr =
-                        std::make_shared<std::vector<unsigned char>>(frame);
+                if (!p.encaps.empty()) {
+                    const std::vector<unsigned char> req{PROTO_VERSION, MSG_LIST_REQUEST};
+                    const auto frame = build_frame(req);
+                    auto frame_ptr = std::make_shared<std::vector<unsigned char>>(frame);
                     std::lock_guard<std::mutex> lk2(ssl_io_mtx);
-                    if (ssl_stream)
-                    {
-                        async_write_frame(ssl_stream, frame_ptr,
-                                          [frame_ptr](const std::error_code &,
-                                                      std::size_t) {});
-                    }
+                    if (ssl_stream) async_write_frame(ssl_stream, frame_ptr, [frame_ptr](const std::error_code &, std::size_t){});
                 }
             }
+        };
+
+        if (!p.encaps.empty() || (initiator && !pi.sent_hello)) {
+            bool handled = initiator
+                ? try_handle_initiator_encaps(pi, p, PeerNameView{peer_name}, KeyContextView{key_context}, MsS{static_cast<int64_t>(ms)})
+                : handle_encaps_present(pi, p, PeerNameView{peer_name}, KeyContextView{key_context}, ExpectedCtLen{expected.ct_len}, MsU{ms});
+            if (handled) handle_ready_state(pi.ready);
+            return handled;
         }
-        else if (pi.ready)
-        {
-            dev_println("[" + std::to_string(ms) +
-                        "] responder confirmed ready for " + peer_name);
-        }
-        else
-        {
-            log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
-        }
-    }
-    else
-    {
-        log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
+        return false;
+    };
+
+    if (!handle_peer_encaps(i_am_initiator)) {
+        if (!i_am_initiator) {
+            if (pi.ready) dev_println("[" + std::to_string(ms) + "] responder confirmed ready for " + peer_name);
+            else log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
+        } else log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
     }
 }
+
+
 
 inline void handle_chat(const Parsed &p)
 {

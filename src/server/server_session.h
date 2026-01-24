@@ -27,7 +27,6 @@ struct SessionData
         hello_message_by_fingerprint;
 };
 
-// Returns empty string on success, error message on failure
 struct HelloBasicsOut
 {
   public:
@@ -150,7 +149,7 @@ static bool check_username_conflicts(SessionData &sd, const std::string &uname,
         return false;
     }
 
-    return true; // username is acceptable
+    return true;
 }
 
 struct ClientRegistrationData

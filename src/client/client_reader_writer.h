@@ -135,7 +135,6 @@ inline void writer_thread()
     while (runtime_globals::is_connected().load(std::memory_order_acquire))
     {
 
-        // Input available, read it
         if (!std::getline(std::cin, line))
 
         {

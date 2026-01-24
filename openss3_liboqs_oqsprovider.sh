@@ -474,7 +474,7 @@ verify_additional_debug() {
 	cd oqs-provider
 	echo "verify oqs_provider branch"
 	verify_git_branch "." "$oqs_provider_ref"
-# You should see this file exists:
+
 echo "ls /usr/local/openssl-3.5/lib64/pkgconfig/liboqs.pc "
 ls /usr/local/openssl-3.5/lib64/pkgconfig/liboqs.pc
 echo "ls /usr/local/openssl-3.5/lib*/pkgconfig/liboqs.pc "

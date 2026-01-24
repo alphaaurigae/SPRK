@@ -9,8 +9,6 @@
 #include <openssl/ssl.h>
 #include <string_view>
 
-// Centralized TLS configuration strings (used in apply_pq_security_policy and
-// success message)
 constexpr std::string_view TLS_HYBRID_GROUPS      = "X25519MLKEM768:X25519";
 constexpr std::string_view TLS_CIPHER_SUITES      = "TLS_AES_256_GCM_SHA384:"
                                                     "TLS_CHACHA20_POLY1305_SHA256:"

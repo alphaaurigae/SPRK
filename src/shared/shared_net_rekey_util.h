@@ -10,8 +10,6 @@
 #include <memory>
 #include <vector>
 
-// namespace asio { class io_context; class steady_timer; }
-
 constexpr uint32_t DEFAULT_REKEY_INTERVAL     = 1024;
 constexpr uint32_t DEFAULT_MAX_SEQ_GAP        = 100;
 constexpr uint32_t DEFAULT_SEQ_JITTER_BUFFER  = 3;

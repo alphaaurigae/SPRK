@@ -17,5 +17,5 @@ print_openssl_info() {
 }
 
 print_openssl_info
-# Run the keygen binary with all arguments passed through
+
 exec bin/user_keygen "$@"

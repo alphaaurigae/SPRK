@@ -21,8 +21,6 @@
 
 #ifdef USE_LIBOQS
 #include <oqs/oqs.h>
-// struct OQS_KEM;
-// struct OQS_SIG;
 #endif
 
 inline constexpr std::size_t KEY_LEN     = 32;
@@ -839,11 +837,7 @@ pqkem_keypair_from_seed(std::string_view alg, const secure_vector &seed)
 #endif
 }
 
-// After existing fingerprint_sha256 and fingerprint_to_hex
-
-// ──────────────────────────────────────────────────────────────
-// Convenience wrappers – added in refactoring steps 2–3
-// ──────────────────────────────────────────────────────────────
+// After existing fingerprint_sha256 and fingerprint_to_hex, convenience wrappers.
 
 inline std::string compute_fingerprint_hex(std::span<const unsigned char> pk)
 {

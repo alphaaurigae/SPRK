@@ -69,7 +69,6 @@ int main(int argc, char **argv)
 
                 if (ec)
                 {
-                    // log and continue accepting
                     std::cerr << "[" << get_current_timestamp_ms()
                               << "] accept failed: " << ec.message() << "\n";
                     accept_loop();

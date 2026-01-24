@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =============================================================================
-#  Post-quantum certificate generator – native OpenSSL 3.5.0
-# =============================================================================
+# Post-quantum certificate generator – native OpenSSL 3.5.0
 
 # IMPORTANT: your build installed libs into lib64, not lib!
 export LD_PRELOAD="/usr/local/openssl-3.5/lib64/libssl.so.3 /usr/local/openssl-3.5/lib64/libcrypto.so.3${LD_PRELOAD:+:$LD_PRELOAD}"
@@ -24,10 +22,6 @@ if ! echo "$OPENSSL_VERSION" | grep -q "OpenSSL 3.5"; then
 fi
 
 echo "Success: Using correct OpenSSL version: $OPENSSL_VERSION"
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Rest of your script (unchanged)
-# ────────────────────────────────────────────────────────────────────────────────
 
 CLIENTS=("ron" "bob" "beth")
 CERT_DIR="sample/sample_test_cert"
@@ -103,9 +97,8 @@ generate_clients() {
     done
 }
 
-# ────────────────────────────────────────────────────────────────────────────────
+
 # Main execution
-# ────────────────────────────────────────────────────────────────────────────────
 
 ensure_entropy
 write_extensions
@@ -124,12 +117,12 @@ echo "Next step: rebuild & run the server"
 
 ls -la "$CERT_DIR"
 
-#openssl rsa -in sample/sample_test_cert/
+# openssl rsa -in sample/sample_test_cert/
 
 head -n 5 sample/sample_test_cert/ca.key
 tail -n 5 sample/sample_test_cert/ca.key
 
-#openssl rsa -in sample/sample_test_cert/server.key -check -noout
+# openssl rsa -in sample/sample_test_cert/server.key -check -noout
 
 lsb_release -a
 

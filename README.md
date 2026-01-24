@@ -1,203 +1,186 @@
 # SPRK-Chat
 
-- Experimental ... 
+Experimental post-quantum end-to-end encrypted chat system: ML-DSA-87 signatures, Kyber512 KEM, X25519MLKEM768 hybrid TLS 1.3.
 
-(LLM GENERATED README)
-
-**Post-Quantum End-to-End Encrypted Chat**
-
-## TEMP notes ...
-
-> Build OS Ubuntu 24 LTS
+> AI LLM generated readme based on repo code.
 
 
-## Use flow:
+## Overview
+Client-server relay with client-side E2E encryption. Server coordinates connections but cannot decrypt. TOFU trust model with SHA-256 fingerprints. Auto key exchange, forward secrecy via ephemeral rotation (1024 msgs), replay protection, exponential backoff reconnect.
 
-### 1. DEPS
-1. Install `openssl 3.5` with `oqs` support... if not present
-`Ubuntu 24 LTS` script to install / clean git `OPENSSL 3.5`, `OQS`, `OQS_provider`
-`./openss3_liboqs_oqsprovider.sh`
-- Run from reporoot e.g `SPRK/`
+**Stack:** C++23, Asio async I/O, OpenSSL 3.5 + oqsprovider, liboqs 0.11+, Poco
 
-### 2. BUILD
-1. Client && Server && KEYGEN
-`./build_cmake.sh` | 
-- Runs cmake to build client && server KEYGEN bin's ... nothing else todo if DEPS setup.
-find the executeables after build w `./build_cmake.sh` ...
+**Limitations:** In-memory only (no persistence), 1-to-1 messaging, TOFU (no PKI), metadata visible to server, experimental/unaudited
+
+
+
+## Crypto Primitives
+
+| Layer | Algorithm | Details |
+|-------|-----------|---------|
+| **TLS** | X25519MLKEM768 | Hybrid KEM (X25519 + ML-KEM-768) |
+| | AES-256-GCM, ChaCha20-Poly1305 | Cipher suites |
+| **Identity** | ML-DSA-87 | 2592B pubkey, ~4595B sig, signs eph_pk\|\|session_id |
+| **KEM** | Kyber512 | 800B pubkey, 768B ciphertext, 32B shared secret |
+| **KDF** | HKDF-SHA256 | IKM=kyber_secret, salt=0×32, info=sorted(fp_a,fp_b)\|session_id |
+| **AEAD** | ChaCha20-Poly1305 | Nonce=HMAC-SHA256(key,seq)[:12], AAD=sorted(fp)\|seq, 16B tag |
+| **Fingerprint** | SHA-256 | Hash of identity_pk, 64-char hex (display 10-char prefix) |
+
+## Security
+
+**Guarantees:** Confidentiality (AEAD), authentication (ML-DSA-87 + fingerprint), integrity (Poly1305 tag), forward secrecy (ephemeral rotation), replay protection (seq validation), quantum resistance (ML-DSA-87 + Kyber512)
+
+**Limitations:** Traffic analysis visible, server logs metadata/graph, TOFU (no PKI), device compromise fatal, forward secrecy resets at rekey
+
+**Threat model:** Network attacker (read/modify/replay), honest-but-curious server, trusted client software
+
+## References
+
+- FIPS 204 (ML-DSA): https://csrc.nist.gov/pubs/fips/204/final
+- ML-KEM (Kyber): https://csrc.nist.gov/pubs/fips/203/final
+- RFC 8439 (ChaCha20-Poly1305): https://tools.ietf.org/html/rfc8439
+- liboqs: https://github.com/open-quantum-safe/liboqs
+- oqsprovider: https://github.com/open-quantum-safe/oqs-provider
+
+
+
+### KEYGEN
+```bash
+./bin/user_keygen  [--raw] [--out-dir ]
 ```
-✔ ~/Desktop/SPRK/bin [main|● 6✚ 4…1] 
-00:28 $ ls -la
-total 27868
-drwxrwxr-x 2 mmmm mmmm     4096 Jan 13 00:27 .
-drwxrwxr-x 9 mmmm mmmm     4096 Jan 13 00:26 ..
--rwxrwxr-x 1 mmmm mmmm 15295608 Jan 13 00:27 client
--rwxrwxr-x 1 mmmm mmmm 11518480 Jan 13 00:26 server
--rwxrwxr-x 1 mmmm mmmm  1705840 Jan 13 00:26 user_keygen
-```
+- Generates ML-DSA-87 keypair via OpenSSL EVP (`EVP_PKEY_keygen`)
+- Outputs: `<name>.sk.pem` (PKCS#8, 4595-byte secret), `<name>.crt` (self-signed X.509, 1yr validity)
+- Optional `.sk.raw` (raw secret+public bytes) with `--raw`
+- No liboqs dependency, uses native OpenSSL 3.5 PQ support
 
-### 3. KEYGEN && CERTGEN
-1. Generate Client user keys `tools/keygen.cpp` (needs `openssl 3.5`, use wrapper script on systems w.o)
-```
-✔ ~/Desktop/SPRK/bin [main|● 6✚ 4…1] 
-00:27 $ ./user_keygen 
-Usage: keygen <base_name> [--raw]
-  --raw   also generate .sk.raw (old raw binary format)
-```
-
-2. Generate Server certs
-`./generate_pq_certs.sh` | output to `sample/sample_test_cert/`
-
-### 4. UNIT
-`./unit.sh` | todo update! Supposed unit test for client and server. Run from reporoot e.g `SPRK/`
-- Todo keygen unit test.
-
-### 5. RUN
-- run wrapper files... Run from reporoot e.g `SPRK/`
-1. Server
-```
-✘-1 ~/Desktop/SPRK/bin [main|● 6✚ 4…1] 
-00:27 $ ./server 
-Usage: chat_server <port>
-```
-`./server.sh` | ip/ url harcoded in serc/server/main.cpp ; port in wrapper file `server.sh`
-or 
-`./bin/server 1566`
-- If `openssl 3.5 w oqs support` present 
-
-2. Client
-```
-✘-1 ~/Desktop/SPRK/bin [main|● 6✚ 4…1] 
-00:30 $ ./client
-Usage: chat_client <server_ip> <server_port> <username> <private_key_path> [--sessionid <id>] [--debug]
-
-Runtime commands:
-help                      show commands
-q                         quit
-list | list users         list connected users
-pubk <username>           fetch user public key
-<fp[,fp...]> <message>    send message to peer(s)
-
-```
-`./client.sh ron sample/ron.sk.pem sample/sample_test_key/ron.crt -sessionid bY5aaFZFaTXxktTSStJW99cQb73KZeRtrMnbvB7gprzecTcatZwqMmYu2tWz --debug`
-[this starts a specific sessionid or joins a specific sessionid]
-or 
-`./bin/client.sh ron sample/ron.sk.pem sample/sample_test_key/ron.crt -sessionid bY5aaFZFaTXxktTSStJW99cQb73KZeRtrMnbvB7gprzecTcatZwqMmYu2tWz --debug`
-If `openssl 3.5 w oqs support` present . On systems without `openssl 3.5` for `bin/client`, `bin/server`
-
-### 6. TIDY
-`./clang-format_clang-tidy.sh src/` == output to `$(pwd)/clang_tidy_output` == Formats `C++` files with clang-format and runs clang-tidy on the original sources.
-
-### 7. CLEAN
-1. 
-`./clean_cmake.sh` 
-- cleanup build dirs of client and server.
-
-
-
-## AI GENERATED TEMP README
-
-## KEYGEN
-```
-keygen (native OpenSSL-based):Generates mldsa87 keypair using OpenSSL's EVP API (no liboqs needed — lighter, more future-proof since OpenSSL 3.5 has native PQ support).
-Saves the private key in PEM format as .sk (compatible with your code's load_pqsig_keypair — it handles PEM).
-Automatically creates a self-signed .crt using the same key (for TLS client auth).
-
-One command: 
-./keygen ron → ron.sk + ron.crt.
-Throws errors if anything fails (e.g., algorithm not available).
-Still PQ-safe (uses ML-DSA-87 for sig).
-
-Key benefits:
-Simpler for users: 
-One tool/call generates everything needed (key for E2E protocol + cert for TLS).
-No liboqs dependency: Relies on your existing OpenSSL 3.5.5 setup.
-
-Secure by default: 
-Self-signed cert is fine for TOFU (server accepts it, protocol verifies fp).
 
 ```
 
-## CLIENT && SERVER
+Generates ML-DSA-87 identity keypairs and self-signed X.509 certificates using OpenSSL 3.5 EVP API.
+
+**Technical operation:**
+- Algorithm: ML-DSA-87 (FIPS 204) via `EVP_PKEY_keygen` with "ML-DSA-87" algorithm string
+- Outputs:
+  - `.sk.pem`: PKCS#8 private key (PEM format, ~4595-byte secret key)
+  - `.crt`: Self-signed X.509 certificate (PEM format, 1-year validity, CN=base_name)
+  - `.sk.raw`: Combined raw secret/public key bytes (optional, with `--raw` flag)
+- Key sizes: 4595-byte secret key, 2592-byte public key
+- Certificate settings: Serial=1, digitalSignature keyUsage, no password protection
+- No liboqs dependency: Uses native OpenSSL 3.5 PQ support
+
+**Example:**
+```bash
+./bin/user_keygen alice          # Creates alice.sk.pem, alice.crt
+./bin/user_keygen bob --raw      # Creates bob.sk.pem, bob.crt, bob.sk.raw
+
 ```
-What the Program Does
-This is a real-time, end-to-end encrypted chat application with a client-server architecture. 
-It's designed for secure messaging using post-quantum cryptography (PQ crypto) to resist future quantum attacks. 
-The server acts as a relay for messages but doesn't decrypt them—encryption is purely client-side. 
 
-Key features include:
+### SERVER
+```bash
+./bin/server 
+```
+- **Transport:** TLS 1.3 mutual auth, X25519MLKEM768 hybrid KEM, AES-256-GCM/ChaCha20-Poly1305
+- **Architecture:** Multi-threaded Asio (N=hardware threads), 4-byte BE length-prefixed frames (max 1MB)
+- **Sessions:** 60-char Base58 session IDs, per-session maps: username→ClientState, fingerprint→ClientState
+- **Handles:** `MSG_HELLO` (validates ML-DSA-87 sig, broadcasts to peers, strips encaps for existing), `MSG_CHAT` (relay by username/fingerprint prefix), `MSG_LIST_REQUEST`, `MSG_PUBKEY_REQUEST`
+- **Validation:** Username 1-64 alphanumeric/_/-, Levenshtein <85%, signature verification
+- **Does NOT:** decrypt, persist, validate sequences, enforce rate limits
 
-Multi-user sessions where clients join with usernames and public keys.
-Automatic key exchanges for shared secrets, with periodic rekeying for forward secrecy.
-Message encryption with replay protection, sequence numbers, and rate limiting.
-Fingerprint-based sender verification (displayed in chat for trust-on-first-use).
-Basic commands like listing users or fetching public keys.
-Resilience to disconnects/reconnects, with timeouts and backoff.
+```
 
-It's not a full production app (e.g., no persistence, offline delivery, or group chats beyond broadcasting), 
-but it's a solid proof-of-concept for PQ-secure comms. 
-The server handles coordination, while clients manage the crypto-heavy lifting.
-High-Level Flow
-The app follows a classic TCP/TLS-based client-server model, 
-with a custom protocol for messages (HELLO for handshakes, CHAT for messages, etc.). 
+Stateless relay server for encrypted message frames with session-based client coordination.
 
-Here's the step-by-step flow:
+**Technical operation:**
+- **Transport:** TLS 1.3 only with X25519MLKEM768 hybrid KEM, mutual certificate authentication
+- **Architecture:** Multi-threaded Asio event loop (N threads = hardware concurrency)
+- **Frame protocol:** 4-byte big-endian length prefix + payload (max 1MB)
+- **Session management:** Clients grouped by 60-char Base58 session ID
+  - Per-session maps: username→ClientState, fingerprint→ClientState, fingerprint→cached_HELLO
+  - Tracks: ephemeral keys, identity keys, original HELLO frames
+- **Message handling:**
+  - `MSG_HELLO`: Validates ML-DSA-87 signature, registers client, broadcasts to session peers (strips encaps for existing clients)
+  - `MSG_CHAT`: Relays encrypted frame by username or fingerprint prefix without decryption
+  - `MSG_LIST_REQUEST`: Returns username list for client's session
+  - `MSG_PUBKEY_REQUEST`: Returns identity public key for requested user
+- **Security validation:**
+  - Username: 1-64 alphanumeric/underscore/hyphen, Levenshtein similarity <85% vs existing
+  - Signature: ML-DSA-87 verification of `eph_pk || session_id`
+  - Session isolation: No cross-session message routing
+- **No persistence:** All state in-memory, cleared on disconnect
 
-Server Startup:
-Initializes TLS context with OpenSSL, loading certs/keys and setting PQ-hybrid key exchange (X25519 + ML-KEM-768).
-Creates a non-blocking TCP listen socket on a specified port.
-Enters a select()-based event loop to handle incoming connections and client data.
+**Key responsibilities:**
+- TLS handshake and mutual authentication
+- HELLO broadcast coordination for key exchange
+- Message routing by fingerprint or username
+- Session membership tracking
+- Does NOT: decrypt messages, validate sequences, persist data, enforce rate limits
 
-Client Connection and Handshake:
-Client loads identity keys (ML-DSA-87 private/public) from PEM files and generates ephemeral keys (Kyber512).
-Establishes a TLS connection to the server (non-blocking, with retry on WANT_READ/WRITE).
-Sends a HELLO message: Includes username, ephemeral public key, 
-identity public key, signature, and optional session ID.
-Server accepts TLS connections, peeks/reads frames, parses HELLO, validates signature/username, 
-registers the client in a session (tracked by fingerprints/nicks).
+**Example:**
+bash
+./bin/server 1566
+# Requires: server.crt, server.key, ca.crt in sample/sample_test_cert/
+```
 
-Server broadcasts the new HELLO to peers (stripping sensitive encaps data for existing clients) 
-and sends existing HELLOs to the newcomer.
-Clients perform KEM (Kyber512): Initiator (lower fingerprint) encapsulates, 
-responder decapsulates; derives shared key via HKDF.
-Once shared key is established (marked "ready"), clients can chat bidirectionally.
-
-Messaging:
-Sender encrypts message with AEAD (using shared key, nonce from seq, 
-AAD with fingerprints/seq).
-Builds CHAT frame with ciphertext, seq, nonce, etc., and sends via TLS.
-Server relays CHAT to destination (by nick or fingerprint prefix), without decrypting.
-Receiver decrypts, checks seq (anti-replay/jitter), rate limits, and displays with timestamp/sender fingerprint.
-
-Ongoing Management:
-Rekey every 1024 messages: Rotate ephemeral keys, re-do KEM.
-Timeouts: Drop stale peers after 60s inactivity.
-Disconnects: Clean up sessions, close sockets/SSL.
-Client reconnects with backoff (up to 10 attempts, exponential delay).
-Commands: LIST_REQUEST for user list, PUBKEY_REQUEST to fetch keys.
-
-Shutdown:
-Graceful TLS shutdown, free resources, unload providers.
+### CLIENT
+```bash
+./bin/client      [--sessionid ]
+```
+- **Identity:** ML-DSA-87 from PEM, SHA-256 fingerprint
+- **Ephemeral:** Kyber512 keypair per connection (800B pubkey, 768B ciphertext)
+- **Key exchange:**
+  1. Send `MSG_HELLO`: username, eph_pk, identity_pk, sig(eph_pk||session_id), session_id
+  2. Determine initiator: lex-lower fingerprint
+  3. Initiator encapsulates → responder decapsulates
+  4. Derive 32B session key: HKDF-SHA256(kyber_secret, salt=0, info=sorted(fp_a,fp_b)||session_id)
+- **Encryption:** ChaCha20-Poly1305 AEAD, nonce=HMAC-SHA256(key,seq)[:12], AAD=sorted(fp_a,fp_b)||seq
+- **Security:** Seq validation (gap≤100, jitter≤3), rate limit 100msg/s, 60s timeout, auto-rekey @1024 msgs
+- **Commands:** `list`, `pubk <user>`, `<fp_prefix> <msg>`
 
 
-The flow emphasizes security: All transport is TLS-protected, app-layer crypto is PQ-safe, 
-and there's no server trust for message content.
+```
+End-to-end encrypted chat client with automatic PQ key exchange and session key derivation.
 
-Technologies Used
+**Technical operation:**
+- **Identity:** ML-DSA-87 keypair from PEM, SHA-256 fingerprint for identification
+- **Transport:** TLS 1.3 with X25519MLKEM768 hybrid KEM, mutual certificate authentication
+- **Ephemeral keys:** Generates Kyber512 keypair on connect (800-byte public key, 768-byte ciphertext)
+- **Key exchange protocol:**
+  1. Send `MSG_HELLO` with username, eph_pk, identity_pk, signature(`eph_pk || session_id`)
+  2. Determine initiator role: lexicographically lower fingerprint
+  3. Initiator: Encapsulate to peer's eph_pk, send ciphertext in reply `MSG_HELLO`
+  4. Responder: Decapsulate received ciphertext with own eph_sk
+  5. Both derive 32-byte session key via HKDF-SHA256:
+     - IKM: Kyber512 shared secret
+     - Info: `sorted(fp_a, fp_b) || session_id`
+- **Message encryption:** ChaCha20-Poly1305 AEAD
+  - Key: Derived session key
+  - Nonce: `HMAC-SHA256(session_key, seq)[:12]`
+  - AAD: `sorted(sender_fp, receiver_fp) || seq` (ASCII string)
+  - Tag: 16 bytes appended to ciphertext
+- **Security features:**
+  - Replay protection: Sequence number validation (gap ≤100, jitter ≤3)
+  - Rate limiting: 100 messages/second per peer
+  - Message timeout: 60s inactivity threshold
+  - Rekeying: Automatic after 1024 sent messages (generates new ephemeral keypair)
+- **Reconnection:** Exponential backoff (1s–60s, max 10 attempts), preserves ephemeral keys within session
+- **Commands:** `list` (active users), `pubk <user>` (fetch identity key), `<fp_prefix> <msg>` (send encrypted message)
 
-Language/Standards: C++23 (uses ranges, noexcept, structured bindings; modern containers like unordered_map/set).
-Networking: POSIX sockets (TCP, non-blocking with fcntl/select), Arpa/inet for addressing.
-Crypto Libraries:
-OpenSSL 3.5 (with oqsprovider for PQ support): Handles TLS 1.3, hybrid KEM (X25519MLKEM768), 
-ciphers like AES-256-GCM.
-liboqs (via OpenSSL provider): PQ algos like Kyber512 (ML-KEM) for key encapsulation, 
-ML-DSA-87 (Dilithium) for signatures.
+**Key responsibilities:**
+- Signature verification of peer HELLOs
+- Automatic KEM role determination and execution
+- Session key derivation with sorted fingerprint context
+- AEAD encryption/decryption with sequence validation
+- Ephemeral key rotation for forward secrecy
+- Fingerprint-based recipient resolution
 
-Custom utils: HKDF for key derivation, AEAD for encryption, SHA256 for fingerprints, Base58 for session IDs.
+**Example:**
+bash
+./bin/client 127.0.0.1 1566 alice sample/alice.sk.pem sample/alice.crt --sessionid <60-char-id>
 
-Build/Tools: CMake for compilation, shell scripts for testing 
-(e.g., client.sh/server.sh).
-Other: STL for data structures/algorithms, chrono for timings, 
-mutex/atomic for threading (reader/writer threads in client).
+# Runtime:
+list users
+4f2e8a3c9d hello bob    # Send to fingerprint prefix
+
 
 ```
 ## TEST LOG
@@ -219,6 +202,39 @@ connect bob session=bY5aaFZFaTXxktTSStJW99cQb73KZeRtrMnbvB7gprzecTcatZwqMmYu2tWz
 connect ron session=bY5aaFZFaTXxktTSStJW99cQb73KZeRtrMnbvB7gprzecTcatZwqMmYu2tWz
 connect bob session=bY5aaFZFaTXxktTSStJW99cQb73KZeRtrMnbvB7gprzecTcatZwqMmYu2tWz
 
+```
+
+## Build Requirements
+
+- Ubuntu 24.04 LTS (tested)
+- CMake 3.20+, C++23 (GCC 13+/Clang 16+)
+- OpenSSL 3.5+ with oqsprovider, liboqs 0.11+
+- asio
+- poco
+
+## Quick Start
+```bash
+# 1. Install deps (OpenSSL 3.5 + OQS)
+./openss3_liboqs_oqsprovider.sh
+
+# 2. Build
+./build_cmake.sh  # → bin/client, bin/server, bin/user_keygen
+
+# 3. Generate server certs
+./generate_pq_certs.sh  # → sample/sample_test_cert/{server.crt,server.key,ca.crt}
+
+# 4. Generate user keys
+./bin/user_keygen alice  # → alice.sk.pem, alice.crt
+./bin/user_keygen bob
+
+# 5. Run
+./bin/server 1566
+./bin/client 127.0.0.1 1566 alice sample/alice.sk.pem sample/alice.crt
+./bin/client 127.0.0.1 1566 bob sample/bob.sk.pem sample/bob.crt
+
+# 6. Chat (alice → bob, use fingerprint prefix from 'list users')
+list users
+4f2e8a3c9d hello bob
 ```
 
 > Test triangular
@@ -377,6 +393,225 @@ ron [4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8]
 [00:45:44] [ron 4991ed2589] "test5"
 db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c test6
 [00:45:55] [beth db0c227079] "test6"
+
+```
+
+###  ./unit.sh
+
+```
+✔ ~/Desktop/SPRK [main|✔] 
+19:07 $ '/home/mmmm/Desktop/SPRK/unit.sh' 
+STARTING FULL SPRK TEST
+RUNNING: Test_001_Client_help
+Test 001: Client help
+SUCCESS: Help complete
+RUNNING: EXEC_002_Start_server
+EXEC 002: Start Server
+STATUS: >>> Sending to server: '/home/mmmm/Desktop/SPRK/server.sh 1566' (start server)
+Connection to 127.0.0.1 1566 port [tcp/*] succeeded!
+SUCCESS: Server listening
+RUNNING: Test_003_Ron_connect
+Test 003: Ron connects
+STATUS: >>> Sending to ron: '/home/mmmm/Desktop/SPRK/client.sh 127.0.0.1 1566 ron /home/mmmm/Desktop/SPRK/sample/ron.sk.pem /home/mmmm/Desktop/SPRK/sample/ron.crt --sessionid nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK' (ron login)
+DEBUG: check_output target=ron pattern=TLS handshake successful timeout=2 grace=3
+PASS: Ron connected
+DEBUG: check_output target=server pattern=connect ron session=.* timeout=2 grace=3
+PASS: Server sees ron
+RUNNING: Test_004_Beth_connect
+Test 004: Beth connects
+STATUS: >>> Sending to beth: '/home/mmmm/Desktop/SPRK/client.sh 127.0.0.1 1566 beth /home/mmmm/Desktop/SPRK/sample/beth.sk.pem /home/mmmm/Desktop/SPRK/sample/beth.crt --sessionid nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK' (beth login)
+DEBUG: check_output target=beth pattern=TLS handshake successful timeout=2 grace=3
+PASS: Beth connected
+DEBUG: check_output target=beth pattern=connect ron pubkey=.* timeout=10 grace=3
+PASS: Beth sees ron
+DEBUG: check_output target=beth pattern=peer ron ready timeout=10 grace=3
+PASS: Beth ready with ron
+DEBUG: check_output target=server pattern=connect beth session=.* timeout=2 grace=3
+PASS: Server sees beth
+RUNNING: Test_005_Ron_Beth_messaging_and_fp_extraction
+Test 005: Ron ↔ Beth messaging + extract FPs
+STATUS: Extracting FPs from ron (after Ron+Beth connected)
+STATUS: >>> Sending to ron: 'list users' (extract FPs)
+Updated FPs after ron list
+FP_BETH_FROM_RON = db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c
+FP_RON_FROM_BETH = 
+FP_BOB_FROM_RON  = 
+FP_BOB_FROM_BETH = 
+FP_RON_FROM_BOB  = 
+FP_BETH_FROM_BOB = 
+STATUS: Extracting FPs from beth (from Beth's view)
+STATUS: >>> Sending to beth: 'list users' (extract FPs)
+Updated FPs after beth list
+FP_BETH_FROM_RON = db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c
+FP_RON_FROM_BETH = 4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8
+FP_BOB_FROM_RON  = 
+FP_BOB_FROM_BETH = 
+FP_RON_FROM_BOB  = 
+FP_BETH_FROM_BOB = 
+STATUS: >>> Sending to ron: 'db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c hello beth from ron' (ron→beth)
+DEBUG: check_output target=beth pattern=\[.*\] \[ron .*] hello beth from ron timeout=2 grace=3
+PASS: Beth received from ron
+STATUS: >>> Sending to beth: '4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8 hello ron from beth' (beth→ron)
+DEBUG: check_output target=ron pattern=\[.*\] \[beth .*] hello ron from beth timeout=2 grace=3
+PASS: Ron received from beth
+RUNNING: Test_006_Bob_connect
+Test 006: Bob connects + triangular rekey
+STATUS: >>> Sending to bob: '/home/mmmm/Desktop/SPRK/client.sh 127.0.0.1 1566 bob /home/mmmm/Desktop/SPRK/sample/bob.sk.pem /home/mmmm/Desktop/SPRK/sample/bob.crt --sessionid nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK' (bob login)
+DEBUG: check_output target=bob pattern=TLS handshake successful timeout=2 grace=3
+PASS: Bob connected
+DEBUG: check_output target=bob pattern=connect ron pubkey=.* timeout=45 grace=3
+PASS: Bob sees ron
+DEBUG: check_output target=bob pattern=connect beth pubkey=.* timeout=45 grace=3
+PASS: Bob sees beth
+DEBUG: check_output target=bob pattern=peer ron ready timeout=45 grace=3
+PASS: Bob ready with ron
+DEBUG: check_output target=bob pattern=peer beth ready timeout=45 grace=3
+PASS: Bob ready with beth
+DEBUG: check_output target=server pattern=connect bob session=.* timeout=2 grace=3
+PASS: Server sees bob
+RUNNING: Test_007_Extract_all_fps_after_bob
+Test 007: Extract all fingerprints after Bob joined
+STATUS: Extracting FPs from ron (from Ron)
+STATUS: >>> Sending to ron: 'list users' (extract FPs)
+Updated FPs after ron list
+FP_BETH_FROM_RON = db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c
+FP_RON_FROM_BETH = 4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8
+FP_BOB_FROM_RON  = 992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26
+FP_BOB_FROM_BETH = 
+FP_RON_FROM_BOB  = 
+FP_BETH_FROM_BOB = 
+STATUS: Extracting FPs from beth (from Beth)
+STATUS: >>> Sending to beth: 'list users' (extract FPs)
+Updated FPs after beth list
+FP_BETH_FROM_RON = db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c
+FP_RON_FROM_BETH = 4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8
+FP_BOB_FROM_RON  = 992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26
+FP_BOB_FROM_BETH = 992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26
+FP_RON_FROM_BOB  = 
+FP_BETH_FROM_BOB = 
+STATUS: Extracting FPs from bob (from Bob)
+STATUS: >>> Sending to bob: 'list users' (extract FPs)
+Updated FPs after bob list
+FP_BETH_FROM_RON = db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c
+FP_RON_FROM_BETH = 4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8
+FP_BOB_FROM_RON  = 992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26
+FP_BOB_FROM_BETH = 992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26
+FP_RON_FROM_BOB  = 4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8
+FP_BETH_FROM_BOB = db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c
+RUNNING: Test_008_Triangular_messaging
+Test 008: Full triangular messaging
+STATUS: >>> Sending to ron: '992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26 hi bob from ron' (ron→bob)
+DEBUG: check_output target=bob pattern=\[.*\] \[ron .*] hi bob from ron timeout=2 grace=3
+PASS: Bob got from ron
+STATUS: >>> Sending to beth: '992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26 hi bob from beth' (beth→bob)
+DEBUG: check_output target=bob pattern=\[.*\] \[beth .*] hi bob from beth timeout=2 grace=3
+PASS: Bob got from beth
+STATUS: >>> Sending to bob: '4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8 hi ron from bob' (bob→ron)
+DEBUG: check_output target=ron pattern=\[.*\] \[bob .*] hi ron from bob timeout=2 grace=3
+PASS: Ron got from bob
+STATUS: >>> Sending to bob: 'db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c hi beth from bob' (bob→beth)
+DEBUG: check_output target=beth pattern=\[.*\] \[bob .*] hi beth from bob timeout=2 grace=3
+PASS: Beth got from bob
+RUNNING: Test_009_Multi_recipient
+Test 009: Multi-recipient messaging
+STATUS: >>> Sending to ron: 'db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c,992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26 group hello from ron' (group)
+DEBUG: check_output target=beth pattern=\[.*\] \[ron .*] group hello from ron timeout=2 grace=3
+PASS: Beth got group
+DEBUG: check_output target=bob pattern=\[.*\] \[ron .*] group hello from ron timeout=2 grace=3
+PASS: Bob got group
+RUNNING: Test_010_Client_commands
+Test 010: Client commands
+STATUS: >>> Sending to ron: 'pubk beth' (pubk beth)
+DEBUG: check_output target=ron pattern=pubkey beth timeout=5 grace=3
+PASS: Ron fetched beth pubkey
+STATUS: >>> Sending to ron: 'pubk bob' (pubk bob)
+DEBUG: check_output target=ron pattern=pubkey bob timeout=5 grace=3
+PASS: Ron fetched bob pubkey
+STATUS: >>> Sending to beth: 'pubk ron' (pubk ron)
+DEBUG: check_output target=beth pattern=pubkey ron timeout=5 grace=3
+PASS: Beth fetched ron pubkey
+STATUS: >>> Sending to beth: 'pubk bob' (pubk bob)
+DEBUG: check_output target=beth pattern=pubkey bob timeout=5 grace=3
+PASS: Beth fetched bob pubkey
+STATUS: >>> Sending to bob: 'pubk ron' (pubk ron)
+DEBUG: check_output target=bob pattern=pubkey ron timeout=5 grace=3
+PASS: Bob fetched ron pubkey
+STATUS: >>> Sending to bob: 'pubk beth' (pubk beth)
+DEBUG: check_output target=bob pattern=pubkey beth timeout=5 grace=3
+PASS: Bob fetched beth pubkey
+RUNNING: Test_011_Post_Ron_reconnect_full_verification
+Test 011: Full verification after Ron reconnect
+STATUS: >>> Sending to ron: 'q' (quit ron)
+STATUS: >>> Sending to ron: '/home/mmmm/Desktop/SPRK/client.sh 127.0.0.1 1566 ron /home/mmmm/Desktop/SPRK/sample/ron.sk.pem /home/mmmm/Desktop/SPRK/sample/ron.crt --sessionid nHkrMugYTkqiQzZxUDq6wzb5NMXPbRv7gBjHmaUCyLFR21onNu9KWwL3CYMK' (ron login)
+DEBUG: check_output target=ron pattern=TLS handshake successful timeout=2 grace=3
+PASS: Ron reconnected
+DEBUG: check_output target=ron pattern=peer beth ready timeout=45 grace=3
+PASS: Ron ready with beth (post-reconnect)
+DEBUG: check_output target=ron pattern=peer bob ready timeout=45 grace=3
+PASS: Ron ready with bob (post-reconnect)
+STATUS: Extracting FPs from ron (post-reconnect)
+STATUS: >>> Sending to ron: 'list users' (extract FPs)
+Updated FPs after ron list
+FP_BETH_FROM_RON = db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c
+FP_RON_FROM_BETH = 4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8
+FP_BOB_FROM_RON  = 992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26
+FP_BOB_FROM_BETH = 992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26
+FP_RON_FROM_BOB  = 4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8
+FP_BETH_FROM_BOB = db0c227079f529113e6fbc595d8469f4dc3e579a80a88c1305eb5a749f042c3c
+STATUS: >>> Sending to ron: '992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26 post-reconnect hi bob from ron' (post-reconnect ron→bob)
+DEBUG: check_output target=bob pattern=\[.*\] \[ron .*] post-reconnect hi bob from ron timeout=2 grace=3
+PASS: Bob got post-reconnect
+STATUS: >>> Sending to beth: '992ec5b63eb1aacb59839bfa8eba896d46012faee0fb21acdc157e95496aad26 post-reconnect hi bob from beth' (post-reconnect beth→bob)
+DEBUG: check_output target=bob pattern=\[.*\] \[beth .*] post-reconnect hi bob from beth timeout=2 grace=3
+PASS: Bob got post-reconnect from beth
+STATUS: >>> Sending to bob: '4991ed25897e7f31ac54b505114bd60ec7113d4f5610462e2f7d5acb199c4ba8 post-reconnect hi ron from bob' (post-reconnect bob→ron)
+DEBUG: check_output target=ron pattern=\[.*\] \[bob .*] post-reconnect hi ron from bob timeout=2 grace=3
+PASS: Ron got post-reconnect from bob
+STATUS: >>> Sending to ron: 'list users' (post-reconnect list)
+DEBUG: check_output target=ron pattern=beth.*\[.*\] timeout=2 grace=3
+PASS: List shows beth (post-reconnect)
+DEBUG: check_output target=ron pattern=bob.*\[.*\] timeout=2 grace=3
+PASS: List shows bob (post-reconnect)
+ALL TESTS PASS
+   ✓ Ron connected
+   ✓ Server sees ron
+   ✓ Beth connected
+   ✓ Beth sees ron
+   ✓ Beth ready with ron
+   ✓ Server sees beth
+   ✓ Beth received from ron
+   ✓ Ron received from beth
+   ✓ Bob connected
+   ✓ Bob sees ron
+   ✓ Bob sees beth
+   ✓ Bob ready with ron
+   ✓ Bob ready with beth
+   ✓ Server sees bob
+   ✓ Bob got from ron
+   ✓ Bob got from beth
+   ✓ Ron got from bob
+   ✓ Beth got from bob
+   ✓ Beth got group
+   ✓ Bob got group
+   ✓ Ron fetched beth pubkey
+   ✓ Ron fetched bob pubkey
+   ✓ Beth fetched ron pubkey
+   ✓ Beth fetched bob pubkey
+   ✓ Bob fetched ron pubkey
+   ✓ Bob fetched beth pubkey
+   ✓ Ron reconnected
+   ✓ Ron ready with beth (post-reconnect)
+   ✓ Ron ready with bob (post-reconnect)
+   ✓ Bob got post-reconnect
+   ✓ Bob got post-reconnect from beth
+   ✓ Ron got post-reconnect from bob
+   ✓ List shows beth (post-reconnect)
+   ✓ List shows bob (post-reconnect)
+Total successful checks: 34
+CLEANUP STARTED ...
+CLEANUP DONE!
+✔ ~/Desktop/SPRK [main|✚ 1] 
+20:01 $ 
 
 
 ```

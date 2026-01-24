@@ -336,7 +336,8 @@ struct TimestampMs
 inline bool check_hello_signature(const Parsed &p, TimestampMs ms,
                                   const std::string &peer_name)
 {
-    bool sig_ok = check_hello_signature_core(p);
+    bool sig_ok{};
+    sig_ok = check_hello_signature_core(p);
     if (!sig_ok)
         dev_println("[" + std::to_string(ms.value) +
                     "] REJECTED: invalid signature from " + peer_name);

@@ -261,73 +261,112 @@ handle_list_request(std::shared_ptr<ClientState>                  client,
 
 inline void
 handle_pubkey_request(std::shared_ptr<ClientState> client, const Parsed &p,
-                      std::unordered_map<std::string, SessionData> &sessions)
-{
-    if (client->session_id.empty())
-        return;
-    auto session_it = sessions.find(client->session_id);
-    if (session_it == sessions.end())
-        return;
+                      std::unordered_map<std::string, SessionData> &sessions) {
+  const auto validate_preconditions = [&]() noexcept -> bool {
+    return client && client->stream && !client->session_id.empty();
+  };
 
-    SessionData               &sd     = session_it->second;
-    std::string                target = trim(p.username);
-    std::vector<unsigned char> pk;
+  const auto find_session = [&]() noexcept -> SessionData * {
+    const auto it = sessions.find(client->session_id);
+    return (it != sessions.end()) ? &it->second : nullptr;
+  };
 
-    auto itn = sd.clients_by_nick.find(target);
-    if (itn != sd.clients_by_nick.end() &&
-        !itn->second->fingerprint_hex.empty())
-    {
-        auto itpk =
-            sd.identity_pk_by_fingerprint.find(itn->second->fingerprint_hex);
-        if (itpk != sd.identity_pk_by_fingerprint.end())
-            pk = itpk->second;
+  const auto sanitize_target =
+      [&](std::string_view raw) noexcept -> std::optional<std::string> {
+    const std::string cleaned = trim(std::string(raw));
+    const bool valid = !cleaned.empty() && cleaned.size() <= MAX_USERNAME &&
+                       is_valid_username(cleaned);
+    return valid ? std::optional(cleaned) : std::nullopt;
+  };
+
+  const auto lookup_by_nickname =
+      [](SessionData &sd,
+         std::string_view nick) noexcept -> std::vector<unsigned char> {
+    const auto it = sd.clients_by_nick.find(std::string(nick));
+    const bool has_client = (it != sd.clients_by_nick.end());
+    const bool has_fp = has_client && !it->second->fingerprint_hex.empty();
+    const bool valid_fp =
+        has_fp && is_valid_hex_token(it->second->fingerprint_hex);
+
+    if (!valid_fp) [[unlikely]]
+      return {};
+
+    const auto pk_it =
+        sd.identity_pk_by_fingerprint.find(it->second->fingerprint_hex);
+    return (pk_it != sd.identity_pk_by_fingerprint.end())
+               ? pk_it->second
+               : std::vector<unsigned char>{};
+  };
+
+  const auto lookup_by_fingerprint_prefix =
+      [](SessionData &sd,
+         std::string_view prefix) noexcept -> std::vector<unsigned char> {
+    if (!is_valid_hex_token(std::string(prefix))) [[unlikely]]
+      return {};
+
+    constexpr auto case_insensitive_match = [](char a, char b) noexcept {
+      return std::tolower(static_cast<unsigned char>(a)) ==
+             std::tolower(static_cast<unsigned char>(b));
+    };
+
+    const auto matches_prefix = [&](const auto &kv) noexcept {
+      const auto &hexfp = kv.first;
+      return hexfp.size() >= prefix.size() &&
+             hexfp.size() >= MIN_FP_PREFIX_HEX &&
+             std::ranges::equal(prefix, hexfp | std::views::take(prefix.size()),
+                                case_insensitive_match);
+    };
+
+    std::vector<std::pair<std::string, std::vector<unsigned char>>> matches;
+    matches.reserve(2);
+
+    for (const auto &[hexfp, pk] : sd.identity_pk_by_fingerprint) {
+      if (matches_prefix(std::pair{hexfp, pk})) {
+        matches.emplace_back(hexfp, pk);
+        if (matches.size() >= 2)
+          break;
+      }
     }
-    else
-    {
-        std::vector<std::string> matches;
-        for (auto &kv : sd.identity_pk_by_fingerprint)
-        {
-            const std::string &hexfp = kv.first;
-            if (hexfp.size() >= target.size())
-            {
-                bool ok = true;
-                for (size_t i = 0; i < target.size(); ++i)
-                {
-                    if (std::tolower((unsigned char)hexfp[i]) !=
-                        std::tolower((unsigned char)target[i]))
-                    {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok)
-                    matches.push_back(hexfp);
-            }
-        }
-        if (matches.size() == 1)
-        {
-            const std::string matched_fp = matches[0];
-            auto itpk = sd.identity_pk_by_fingerprint.find(matched_fp);
-            if (itpk != sd.identity_pk_by_fingerprint.end())
-                pk = itpk->second;
-        }
-    }
 
-    auto resp      = build_pubkey_response(target, pk);
-    auto resp_copy = std::make_shared<const std::vector<unsigned char>>(resp);
-    async_write_frame(
-        client->stream, resp_copy,
-        [](const std::error_code &ec, std::size_t)
-        {
-            if (ec)
-                std::cerr
-                    << "[" << get_current_timestamp_ms()
-                    << "] handle_pubkey_request: async_write_frame failed: "
-                    << ec.message() << "\n";
-            else
-                std::cerr << "[" << get_current_timestamp_ms()
-                          << "] handle_pubkey_request: response sent\n";
-        });
+    return (matches.size() == 1) ? matches[0].second
+                                 : std::vector<unsigned char>{};
+  };
+
+  const auto send_response =
+      [&](std::string_view username,
+          const std::vector<unsigned char> &pk) noexcept {
+        const auto resp = build_pubkey_response(std::string(username), pk);
+        auto resp_copy =
+            std::make_shared<const std::vector<unsigned char>>(std::move(resp));
+
+        async_write_frame(client->stream, resp_copy,
+                          [](const std::error_code &ec, std::size_t) noexcept {
+                            if (ec) [[unlikely]]
+                              std::cerr
+                                  << "[" << get_current_timestamp_ms()
+                                  << "] handle_pubkey_request: write failed: "
+                                  << ec.message() << "\n";
+                          });
+      };
+
+  if (!validate_preconditions()) [[unlikely]]
+    return;
+
+  SessionData *const sd = find_session();
+  if (sd == nullptr) [[unlikely]]
+    return;
+
+  const auto target_opt = sanitize_target(p.username);
+  if (!target_opt) [[unlikely]]
+    return;
+
+  const std::string &target = *target_opt;
+
+  const auto pk_by_nick = lookup_by_nickname(*sd, target);
+  const auto &pk = !pk_by_nick.empty()
+                       ? pk_by_nick
+                       : lookup_by_fingerprint_prefix(*sd, target);
+
+  send_response(target, pk);
 }
-
 #endif

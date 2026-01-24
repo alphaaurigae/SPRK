@@ -13,10 +13,21 @@
 #include <mutex>
 #include <vector>
 
-struct RecipientFP
+struct RecipientFP final
 {
-    std::string value;
+  public:
+    std::string value{};
+
+    struct FP
+    {
+        std::string v{};
+        explicit FP(std::string s) noexcept : v(std::move(s)) {}
+    };
+
+    static RecipientFP make(FP fp) { return RecipientFP(std::move(fp.v)); }
+
     explicit RecipientFP(std::string fp) noexcept : value(std::move(fp)) {}
+
     [[nodiscard]] const std::string &str() const & { return value; }
     [[nodiscard]] std::string      &&str()      &&{ return std::move(value); }
 };

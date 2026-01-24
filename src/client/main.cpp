@@ -249,11 +249,13 @@ try
 }
 catch (const std::exception &e)
 {
-    std::cerr << "Fatal error: " << e.what() << "\n";
+    dev_println(std::string("[") + std::to_string(get_current_timestamp_ms()) +
+                "] fatal error: " + e.what());
     return 1;
 }
 catch (...)
 {
-    std::cerr << "Fatal unknown error\n";
+    dev_println(std::string("[") + std::to_string(get_current_timestamp_ms()) +
+                "] fatal unknown error");
     return 1;
 }

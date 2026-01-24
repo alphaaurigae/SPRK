@@ -1,4 +1,3 @@
-// client_session.h
 #ifndef CLIENT_SESSION_H
 #define CLIENT_SESSION_H
 
@@ -41,19 +40,49 @@ struct PortInt
 
 struct PersistedEphPk
 {
-    secure_vector &v;
+    struct Proxy
+    {
+        secure_vector *p{};
+        explicit Proxy(secure_vector &r) noexcept : p(&r) {}
+        Proxy &operator=(const secure_vector &rhs) noexcept
+        {
+            *p = rhs;
+            return *this;
+        }
+        operator secure_vector &() noexcept { return *p; }
+    } v;
     explicit PersistedEphPk(secure_vector &ref) noexcept : v(ref) {}
 };
 
 struct PersistedEphSk
 {
-    secure_vector &v;
+    struct Proxy
+    {
+        secure_vector *p{};
+        explicit Proxy(secure_vector &r) noexcept : p(&r) {}
+        Proxy &operator=(const secure_vector &rhs) noexcept
+        {
+            *p = rhs;
+            return *this;
+        }
+        operator secure_vector &() noexcept { return *p; }
+    } v;
     explicit PersistedEphSk(secure_vector &ref) noexcept : v(ref) {}
 };
 
 struct HavePersistedEph
 {
-    bool &v;
+    struct Proxy
+    {
+        bool *p{};
+        explicit Proxy(bool &r) noexcept : p(&r) {}
+        Proxy &operator=(bool rhs) noexcept
+        {
+            *p = rhs;
+            return *this;
+        }
+        operator bool() const noexcept { return *p; }
+    } v;
     explicit HavePersistedEph(bool &ref) noexcept : v(ref) {}
 };
 
@@ -193,5 +222,4 @@ attempt_connection_async(asio::io_context &io, ServerStr server, PortInt port,
                 });
         });
 }
-
 #endif

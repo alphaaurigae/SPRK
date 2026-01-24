@@ -1,4 +1,3 @@
-// client_message_util.h
 #ifndef CLIENT_MESSAGE_UTIL_H
 #define CLIENT_MESSAGE_UTIL_H
 
@@ -49,7 +48,6 @@ bool        handle_encaps_present(PeerInfo &pi, const Parsed &p,
 bool        try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
                                         PeerNameView   peer_name,
                                         KeyContextView key_context, MsS ms);
-void        log_awaiting_encaps(PeerNameView peer_name, MsU ms);
 std::string build_key_context_for_peer(const std::string &my_fp,
                                        const std::string &peer_fp_hex_ref,
                                        const std::string &session_id_val);

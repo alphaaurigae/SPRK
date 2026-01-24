@@ -1,4 +1,3 @@
-// client_crypto_util.h
 #ifndef CLIENT_CRYPTO_UTIL_H
 #define CLIENT_CRYPTO_UTIL_H
 

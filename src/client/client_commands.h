@@ -14,130 +14,112 @@
 #include <mutex>
 #include <vector>
 
-struct RecipientFP final
-{
-  public:
-    std::string value{};
+struct RecipientFP final {
+public:
+  std::string value{};
 
-    struct FP
-    {
-        std::string v{};
-        explicit FP(std::string s) noexcept : v(std::move(s)) {}
-    };
+  struct FP {
+    std::string v{};
+    explicit FP(std::string s) noexcept : v(std::move(s)) {}
+  };
 
-    static RecipientFP make(FP fp) { return RecipientFP(std::move(fp.v)); }
+  static RecipientFP make(FP fp) { return RecipientFP(std::move(fp.v)); }
 
-    explicit RecipientFP(std::string fp) noexcept : value(std::move(fp)) {}
+  explicit RecipientFP(std::string fp) noexcept : value(std::move(fp)) {}
 
-    [[nodiscard]] const std::string &str() const & { return value; }
-    [[nodiscard]] std::string      &&str()      &&{ return std::move(value); }
+  [[nodiscard]] const std::string &str() const & { return value; }
+  [[nodiscard]] std::string &&str() && { return std::move(value); }
 };
 
 #ifdef __clang__
 #endif
 
-inline std::vector<std::string> parse_recipient_list(const std::string &input)
-{
-    std::vector<std::string> recipients;
-    size_t                   start = 0;
-    while (true)
-    {
-        const auto comma = input.find(',', start);
-        if (comma == std::string::npos)
-        {
-            const std::string r = trim(input.substr(start));
-            if (!r.empty())
-                recipients.push_back(r);
-            break;
-        }
-        const std::string r = trim(input.substr(start, comma - start));
-        if (!r.empty())
-            recipients.push_back(r);
-        start = comma + 1;
+inline std::vector<std::string> parse_recipient_list(const std::string &input) {
+  std::vector<std::string> recipients;
+  size_t start = 0;
+  while (true) {
+    const auto comma = input.find(',', start);
+    if (comma == std::string::npos) {
+      const std::string r = trim(input.substr(start));
+      if (!r.empty())
+        recipients.push_back(r);
+      break;
     }
-    return recipients;
+    const std::string r = trim(input.substr(start, comma - start));
+    if (!r.empty())
+      recipients.push_back(r);
+    start = comma + 1;
+  }
+  return recipients;
 }
 
-inline bool handle_client_command(const std::string &line)
-{
-    if (line == "help")
+inline bool handle_client_command(const std::string &line) {
+  if (line == "help") {
+    std::cout << "q                         quit\n"
+                 "list | list users         list connected users\n"
+                 "pubk <username>           fetch user public key\n"
+                 "<fp[,fp...]> <message>    send message to peer(s)\n";
+    return true;
+  }
+
+  if (line == "q") {
+    runtime_globals::should_reconnect() = false;
+    runtime_globals::is_connected() = false;
+    return true;
+  }
+
+  if (line == "list" || line == "list users" || line == "list user") {
+    const std::vector<unsigned char> p{PROTO_VERSION, MSG_LIST_REQUEST};
+    const auto f = build_frame(p);
+
+    auto frame_ptr = std::make_shared<std::vector<unsigned char>>(f);
+
     {
-        std::cout << "q                         quit\n"
-                     "list | list users         list connected users\n"
-                     "pubk <username>           fetch user public key\n"
-                     "<fp[,fp...]> <message>    send message to peer(s)\n";
+      std::lock_guard<std::mutex> lk{runtime_globals::ssl_io_mtx()};
+      if (!runtime_globals::ssl_stream()) {
+        runtime_globals::is_connected() = false;
+        handle_disconnect(UsernameView{""}, FpHexView{""});
         return true;
+      }
+      async_write_frame(runtime_globals::ssl_stream(), frame_ptr,
+                        [frame_ptr](const std::error_code &ec, std::size_t) {
+                          if (ec) {
+                            runtime_globals::is_connected() = false;
+                            handle_disconnect(UsernameView{""}, FpHexView{""});
+                          }
+                        });
     }
+    return true;
+  }
 
-    if (line == "q")
+  if (line.starts_with("pubk ")) {
+    const std::string who = trim(line.substr(5));
+    if (!is_valid_username(who)) {
+      std::cout << "invalid username\n";
+      return true;
+    }
+    const auto req = build_pubkey_request(who);
+    auto frame_ptr = std::make_shared<std::vector<unsigned char>>(req);
+
     {
-        runtime_globals::should_reconnect() = false;
-        runtime_globals::is_connected()     = false;
+      std::lock_guard<std::mutex> lk(runtime_globals::ssl_io_mtx());
+      if (!runtime_globals::ssl_stream()) {
+        runtime_globals::is_connected() = false;
+        handle_disconnect(UsernameView{who}, FpHexView{""});
         return true;
-    }
-
-    if (line == "list" || line == "list users" || line == "list user")
-    {
-        const std::vector<unsigned char> p{PROTO_VERSION, MSG_LIST_REQUEST};
-        const auto                       f = build_frame(p);
-
-        auto frame_ptr = std::make_shared<std::vector<unsigned char>>(f);
-
-        {
-            std::lock_guard<std::mutex> lk{runtime_globals::ssl_io_mtx()};
-            if (!runtime_globals::ssl_stream())
-            {
-                runtime_globals::is_connected() = false;
-                handle_disconnect(UsernameView{""}, FpHexView{""});
-                return true;
+      }
+      async_write_frame(
+          runtime_globals::ssl_stream(), frame_ptr,
+          [frame_ptr, who](const std::error_code &ec, std::size_t) {
+            if (ec) {
+              runtime_globals::is_connected() = false;
+              handle_disconnect(UsernameView{who}, FpHexView{""});
             }
-            async_write_frame(
-                runtime_globals::ssl_stream(), frame_ptr,
-                [frame_ptr](const std::error_code &ec, std::size_t)
-                {
-                    if (ec)
-                    {
-                        runtime_globals::is_connected() = false;
-                        handle_disconnect(UsernameView{""}, FpHexView{""});
-                    }
-                });
-        }
-        return true;
+          });
     }
-
-    if (line.starts_with("pubk "))
-    {
-        const std::string who = trim(line.substr(5));
-        if (!is_valid_username(who))
-        {
-            std::cout << "invalid username\n";
-            return true;
-        }
-        const auto req = build_pubkey_request(who);
-        auto frame_ptr = std::make_shared<std::vector<unsigned char>>(req);
-
-        {
-            std::lock_guard<std::mutex> lk(runtime_globals::ssl_io_mtx());
-            if (!runtime_globals::ssl_stream())
-            {
-                runtime_globals::is_connected() = false;
-                handle_disconnect(UsernameView{who}, FpHexView{""});
-                return true;
-            }
-            async_write_frame(
-                runtime_globals::ssl_stream(), frame_ptr,
-                [frame_ptr, who](const std::error_code &ec, std::size_t)
-                {
-                    if (ec)
-                    {
-                        runtime_globals::is_connected() = false;
-                        handle_disconnect(UsernameView{who}, FpHexView{""});
-                    }
-                });
-        }
-        return true;
-    }
-    return false;
+    return true;
+  }
+  return false;
 }
 
 #endif

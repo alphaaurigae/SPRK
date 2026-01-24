@@ -92,17 +92,32 @@ struct KeyContextParams
         explicit SessionID(std::string_view s) noexcept : v(s) {}
     };
 
+    struct MyFPIn
+    {
+        std::string_view v{};
+        explicit MyFPIn(std::string_view s) noexcept : v(s) {}
+    };
+    struct PeerFPIn
+    {
+        std::string_view v{};
+        explicit PeerFPIn(std::string_view s) noexcept : v(s) {}
+    };
+    struct SessionIDIn
+    {
+        std::string_view v{};
+        explicit SessionIDIn(std::string_view s) noexcept : v(s) {}
+    };
     static KeyContextParams make(MyFP my, PeerFP peer, SessionID sid)
     {
-        return KeyContextParams(my.v, peer.v, sid.v);
+        return KeyContextParams(MyFPIn{my.v}, PeerFPIn{peer.v},
+                                SessionIDIn{sid.v});
     }
 
     KeyContextParams() = delete;
 
   private:
-    explicit KeyContextParams(std::string_view my, std::string_view peer,
-                              std::string_view sid)
-        : my_fp(my), peer_fp(peer), session_id(sid)
+    explicit KeyContextParams(MyFPIn my, PeerFPIn peer, SessionIDIn sid)
+        : my_fp(my.v), peer_fp(peer.v), session_id(sid.v)
     {
     }
 };

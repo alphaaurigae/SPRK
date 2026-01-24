@@ -16,14 +16,6 @@
 #include <mutex>
 #include <span>
 #include <vector>
-/*
-extern secure_vector               peer_globals::my_eph_pk();
-extern secure_vector               peer_globals::my_eph_sk();
-extern secure_vector               peer_globals::my_identity_pk();
-extern secure_vector               peer_globals::my_identity_sk();
-
-*/
-void asio_reader_loop();
 
 struct ServerStr
 {

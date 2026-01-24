@@ -119,7 +119,7 @@ inline std::string &my_fp_hex() noexcept
     return obj;
 }
 
-}
+} // namespace peer_globals
 
 static bool check_rate_limit(PeerInfo &pi) noexcept
 {

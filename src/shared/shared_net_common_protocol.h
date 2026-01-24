@@ -100,7 +100,7 @@ build_pubkey_request(const std::string &username);
 build_pubkey_response(const std::string                &username,
                       const std::vector<unsigned char> &pubkey);
 
-}
+} // namespace proto
 
 using Parsed = proto::Parsed;
 using proto::build_chat;
@@ -294,7 +294,7 @@ parse_pubkey_response(std::span<const unsigned char> payload, size_t idx)
     return out;
 }
 
-}
+} // namespace proto_detail
 
 [[nodiscard]] inline std::vector<unsigned char>
 proto::build_frame(std::span<const unsigned char> payload)

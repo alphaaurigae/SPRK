@@ -31,7 +31,6 @@
 
 struct RecipientFP;
 
-
 bool        validate_eph_pk_length(const Parsed &p, PeerNameView peer_name,
                                    ExpectedPkLen expected_pk_len, MsU ms);
 bool        handle_encaps_present(PeerInfo &pi, const Parsed &p,
@@ -280,7 +279,7 @@ inline bool process_peer_encaps(const Parsed &p, PeerNameIn peer_name,
 
     return false;
 }
-}
+} // namespace detail
 
 inline void handle_hello(const Parsed &p)
 {

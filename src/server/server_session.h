@@ -199,32 +199,35 @@ static void register_client(SessionData                  &sd,
     const auto &frame = data.frame;
     const auto &p     = data.p;
 
-    std::cerr << "[" << get_current_timestamp_ms()
-              << "] register_client: uname='" << uname
+    const auto now = get_current_timestamp_ms();
+
+    std::cerr << "[" << now << "] register_client: uname='" << uname
               << "' fp_present=" << (!p.identity_pk.empty())
               << " frame_len=" << frame.size() << "\n";
 
-    std::string fp_hex =
-        p.identity_pk.empty() ? "" : compute_fingerprint_hex(p.identity_pk);
+    const bool has_pk = !p.identity_pk.empty();
 
-    sd.clients_by_nick[uname] = client;
+    secure_vector dummy_pk(SHA256_LEN);
+    if (!has_pk)
+        RAND_bytes(dummy_pk.data(), static_cast<int>(dummy_pk.size()));
 
-    if (!fp_hex.empty())
-    {
-        sd.clients_by_fingerprint[fp_hex]       = client;
-        sd.nick_by_fingerprint[fp_hex]          = uname;
-        sd.eph_by_fingerprint[fp_hex]           = p.eph_pk;
-        sd.identity_pk_by_fingerprint[fp_hex]   = p.identity_pk;
-        sd.hello_message_by_fingerprint[fp_hex] = frame;
-        std::cerr << "[" << get_current_timestamp_ms()
-                  << "] register_client: registered fingerprint="
-                  << fp_hex.substr(0, 10) << "\n";
-    }
-    else
-    {
-        sd.hello_message_by_fingerprint[""] = frame;
-        std::cerr << "[" << get_current_timestamp_ms()
-                  << "] register_client: registered anonymous hello\n";
-    }
+    const auto &pk = has_pk ? p.identity_pk : dummy_pk;
+
+    const std::string fp_hex = compute_fingerprint_hex(pk);
+
+    const bool valid_fp = has_pk & is_valid_hex_token(fp_hex);
+
+    if (!valid_fp)
+        throw std::runtime_error("invalid or missing identity");
+
+    sd.clients_by_nick.insert_or_assign(uname, client);
+    sd.clients_by_fingerprint.insert_or_assign(fp_hex, client);
+    sd.nick_by_fingerprint.insert_or_assign(fp_hex, uname);
+    sd.eph_by_fingerprint.insert_or_assign(fp_hex, p.eph_pk);
+    sd.identity_pk_by_fingerprint.insert_or_assign(fp_hex, p.identity_pk);
+    sd.hello_message_by_fingerprint.insert_or_assign(fp_hex, frame);
+
+    std::cerr << "[" << now << "] register_client: registered fp="
+              << fp_hex.substr(0, MIN_FP_PREFIX_HEX) << "\n";
 }
 #endif

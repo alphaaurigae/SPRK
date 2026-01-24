@@ -41,6 +41,6 @@ inline std::atomic_bool &should_reconnect() noexcept
     return obj;
 }
 
-}
+} // namespace runtime_globals
 
 #endif

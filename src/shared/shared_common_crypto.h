@@ -837,7 +837,8 @@ pqkem_keypair_from_seed(std::string_view alg, const secure_vector &seed)
 #endif
 }
 
-// After existing fingerprint_sha256 and fingerprint_to_hex, convenience wrappers.
+// After existing fingerprint_sha256 and fingerprint_to_hex, convenience
+// wrappers.
 
 inline std::string compute_fingerprint_hex(std::span<const unsigned char> pk)
 {

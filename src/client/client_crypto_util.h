@@ -2,6 +2,7 @@
 #define CLIENT_CRYPTO_UTIL_H
 
 #include "client_peer_manager.h"
+#include "client_runtime.h"
 #include "shared_common_crypto.h"
 #include "shared_common_util.h"
 #include "shared_net_common_protocol.h"
@@ -22,43 +23,51 @@ struct PeerInfo;
 
 static void rotate_ephemeral_if_needed(const std::string &peer_fp)
 {
-    const std::lock_guard<std::mutex> lk(peers_mtx);
-    const auto                        it = peers.find(peer_fp);
-    if (it == peers.end() || !should_rekey(it->second.send_seq, REKEY_INTERVAL))
+    const std::lock_guard<std::mutex> lk(peer_globals::peers_mtx());
+    const auto                        it = peer_globals::peers().find(peer_fp);
+    if (it == peer_globals::peers().end() ||
+        !should_rekey(it->second.send_seq, REKEY_INTERVAL))
         return;
 
-    const auto                 ms       = get_current_timestamp_ms();
-    auto                       eph_pair = pqkem_keypair(KEM_ALG_NAME);
-    secure_vector              new_pk   = eph_pair.first;
-    secure_vector              new_sk   = eph_pair.second;
+    const auto    ms       = get_current_timestamp_ms();
+    auto          eph_pair = pqkem_keypair(KEM_ALG_NAME);
+    secure_vector new_pk   = eph_pair.first;
+    secure_vector new_sk   = eph_pair.second;
+
     std::vector<unsigned char> sig_data;
-    sig_data.reserve(new_pk.size() + session_id.size());
+    sig_data.reserve(new_pk.size() + peer_globals::session_id().size());
     sig_data.insert(sig_data.end(), new_pk.begin(), new_pk.end());
-    sig_data.insert(sig_data.end(), session_id.begin(), session_id.end());
-    const std::vector<unsigned char> signature_vec =
-        pqsig_sign(SIG_ALG_NAME,
-                   std::vector<unsigned char>(my_identity_sk.begin(),
-                                              my_identity_sk.end()),
-                   sig_data);
-    const std::vector<unsigned char> identity_pk_vec(my_identity_pk.begin(),
-                                                     my_identity_pk.end());
-    const std::vector<unsigned char> empty_encaps;
-    const auto                       hello_frame = build_hello(
-        my_username, ALGO_KEM_ALG_NAME,
-        std::vector<unsigned char>(new_pk.begin(), new_pk.end()), ALGO_MLDSA87,
-        identity_pk_vec, signature_vec, empty_encaps, session_id);
+    sig_data.insert(sig_data.end(), peer_globals::session_id().begin(),
+                    peer_globals::session_id().end());
+
+    const std::vector<unsigned char> signature_vec = pqsig_sign(
+        SIG_ALG_NAME,
+        std::vector<unsigned char>(peer_globals::my_identity_sk().begin(),
+                                   peer_globals::my_identity_sk().end()),
+        sig_data);
+
+    const std::vector<unsigned char> identity_pk_vec(
+        peer_globals::my_identity_pk().begin(),
+        peer_globals::my_identity_pk().end());
+
+    const auto hello_frame =
+        build_hello(peer_globals::my_username(), ALGO_KEM_ALG_NAME,
+                    std::vector<unsigned char>(new_pk.begin(), new_pk.end()),
+                    ALGO_MLDSA87, identity_pk_vec, signature_vec,
+                    std::vector<unsigned char>{}, peer_globals::session_id());
+
     auto frame_ptr = std::make_shared<std::vector<unsigned char>>(hello_frame);
     {
-        const std::lock_guard<std::mutex> lk(peers_mtx);
-        if (!ssl_stream)
+        const std::lock_guard<std::mutex> lk(peer_globals::peers_mtx());
+        if (!runtime_globals::ssl_stream())
             return;
-        async_write_frame(ssl_stream, frame_ptr,
+        async_write_frame(runtime_globals::ssl_stream(), frame_ptr,
                           [frame_ptr](const std::error_code &, std::size_t) {});
 
-        my_eph_pk     = new_pk;
-        my_eph_sk     = new_sk;
-        const auto it = peers.find(peer_fp);
-        if (it != peers.end())
+        peer_globals::my_eph_pk() = new_pk;
+        peer_globals::my_eph_sk() = new_sk;
+        const auto it             = peer_globals::peers().find(peer_fp);
+        if (it != peer_globals::peers().end())
         {
             auto &pi    = it->second;
             pi.send_seq = 0;
@@ -179,14 +188,15 @@ static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
     try
     {
         const secure_vector shared =
-            pqkem_decaps(KEM_ALG_NAME, p.encaps, my_eph_sk);
+            pqkem_decaps(KEM_ALG_NAME, p.encaps, peer_globals::my_eph_sk());
         pi.sk =
             derive_shared_key_from_secret(shared, std::string(key_context.v));
         std::cerr << "[KEY] Derived for " << std::string(peer_name.v)
                   << " key=" << to_hex(pi.sk.key).substr(0, 32)
                   << " context=" << std::string(key_context.v) << " (encaps)\n";
-        dev_println("[" + std::to_string(ms.v) + "] DEBUG decaps: my=" +
-                    my_username + " peer=" + std::string(peer_name.v) +
+        dev_println("[" + std::to_string(ms.v) +
+                    "] DEBUG decaps: my=" + peer_globals::my_username() +
+                    " peer=" + std::string(peer_name.v) +
                     " context=" + std::string(key_context.v) +
                     " keysize=" + std::to_string(pi.sk.key.size()));
         pi.ready             = true;
@@ -211,12 +221,13 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
         std::string peer_fp_hex =
             fingerprint_to_hex(fingerprint_sha256(std::vector<unsigned char>(
                 pi.identity_pk.begin(), pi.identity_pk.end())));
-        bool initiator = my_fp_hex < peer_fp_hex;
+        bool initiator = peer_globals::my_fp_hex() < peer_fp_hex;
 
-        dev_println(">>> INITIATOR SENDING ENCAPS! my=" + my_username +
-                    " peer=" + std::string(peer_name.v) +
-                    " initiator=" + std::to_string(initiator) +
-                    " already_sent=" + std::to_string(pi.sent_hello));
+        dev_println(
+            ">>> INITIATOR SENDING ENCAPS! my=" + peer_globals::my_username() +
+            " peer=" + std::string(peer_name.v) +
+            " initiator=" + std::to_string(initiator) +
+            " already_sent=" + std::to_string(pi.sent_hello));
 
         const auto enc_pair = pqkem_encaps(
             KEM_ALG_NAME,
@@ -231,8 +242,9 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
                   << " key=" << to_hex(pi.sk.key).substr(0, 32)
                   << " context=" << std::string(key_context.v) << " (encaps)\n";
 
-        dev_println("[" + std::to_string(ms.v) + "] DEBUG encaps: my=" +
-                    my_username + " peer=" + std::string(peer_name.v) +
+        dev_println("[" + std::to_string(ms.v) +
+                    "] DEBUG encaps: my=" + peer_globals::my_username() +
+                    " peer=" + std::string(peer_name.v) +
                     " context=" + std::string(key_context.v) +
                     " keysize=" + std::to_string(pi.sk.key.size()));
 
@@ -240,35 +252,40 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
         pi.identity_verified = true;
 
         std::vector<unsigned char> sig_data2;
-        sig_data2.reserve(my_eph_pk.size() + p.session_id.size());
-        sig_data2.insert(sig_data2.end(), my_eph_pk.begin(), my_eph_pk.end());
+        sig_data2.reserve(peer_globals::my_eph_pk().size() +
+                          p.session_id.size());
+        sig_data2.insert(sig_data2.end(), peer_globals::my_eph_pk().begin(),
+                         peer_globals::my_eph_pk().end());
         sig_data2.insert(sig_data2.end(), p.session_id.begin(),
                          p.session_id.end());
 
-        const std::vector<unsigned char> signature_vec =
-            pqsig_sign(SIG_ALG_NAME,
-                       std::vector<unsigned char>(my_identity_sk.begin(),
-                                                  my_identity_sk.end()),
-                       sig_data2);
+        const std::vector<unsigned char> signature_vec = pqsig_sign(
+            SIG_ALG_NAME,
+            std::vector<unsigned char>(peer_globals::my_identity_sk().begin(),
+                                       peer_globals::my_identity_sk().end()),
+            sig_data2);
 
-        const std::vector<unsigned char> identity_pk_vec(my_identity_pk.begin(),
-                                                         my_identity_pk.end());
-        const auto                       reply = build_hello(
-            my_username, ALGO_KEM_ALG_NAME,
-            std::vector<unsigned char>(my_eph_pk.begin(), my_eph_pk.end()),
+        const std::vector<unsigned char> identity_pk_vec(
+            peer_globals::my_identity_pk().begin(),
+            peer_globals::my_identity_pk().end());
+        const auto reply = build_hello(
+            peer_globals::my_username(), ALGO_KEM_ALG_NAME,
+            std::vector<unsigned char>(peer_globals::my_eph_pk().begin(),
+                                       peer_globals::my_eph_pk().end()),
             ALGO_MLDSA87, identity_pk_vec, signature_vec, encaps_ct,
             p.session_id);
 
         auto frame_ptr = std::make_shared<std::vector<unsigned char>>(reply);
         {
-            std::lock_guard<std::mutex> lk(ssl_io_mtx);
-            if (!ssl_stream)
+            std::lock_guard<std::mutex> lk(runtime_globals::ssl_io_mtx());
+            if (!runtime_globals::ssl_stream())
                 return false;
             async_write_frame(
-                ssl_stream, frame_ptr,
+                runtime_globals::ssl_stream(), frame_ptr,
                 [frame_ptr](const std::error_code &, std::size_t) {});
         }
         pi.sent_hello = true;
+
         return true;
     }
     catch (const std::exception &e)
@@ -288,13 +305,13 @@ bool validate_username(PeerNameView peer_name, MsU ms)
                     "] REJECTED: invalid username format");
         return false;
     }
-    if (std::string(peer_name.v) == my_username)
+    if (std::string(peer_name.v) == peer_globals::my_username())
     {
         dev_println("[" + std::to_string(ms.v) +
                     "] REJECTED: self-connection attempt");
         return false;
     }
-    if (std::string(peer_name.v) == my_username)
+    if (std::string(peer_name.v) == peer_globals::my_username())
     {
         dev_println("[" + std::to_string(ms.v) +
                     "] REJECTED: self-messaging blocked");
@@ -305,14 +322,16 @@ bool validate_username(PeerNameView peer_name, MsU ms)
 
 bool check_peer_limits(PeerKeyView peer_key, MsU ms)
 {
-    if (peers.size() >= MAX_PEERS &&
-        peers.find(std::string(peer_key.v)) == peers.end())
+    if (peer_globals::peers().size() >= MAX_PEERS &&
+        peer_globals::peers().find(std::string(peer_key.v)) ==
+            peer_globals::peers().end())
     {
         dev_println("[" + std::to_string(ms.v) +
-                    "] REJECTED: max peers limit reached");
+                    "] REJECTED: max peer_globals::peers() limit reached");
     }
-    return !(peers.size() >= MAX_PEERS &&
-             peers.find(std::string(peer_key.v)) == peers.end());
+    return !(peer_globals::peers().size() >= MAX_PEERS &&
+             peer_globals::peers().find(std::string(peer_key.v)) ==
+                 peer_globals::peers().end());
 }
 
 inline bool check_hello_signature_core(const Parsed &p)
@@ -322,10 +341,23 @@ inline bool check_hello_signature_core(const Parsed &p)
     sig_data.insert(sig_data.end(), p.eph_pk.begin(), p.eph_pk.end());
     sig_data.insert(sig_data.end(), p.session_id.begin(), p.session_id.end());
 
-    return (p.id_alg == ALGO_MLDSA87)
-               ? pqsig_verify(SIG_ALG_NAME, p.identity_pk, sig_data,
-                              p.signature)
-               : false;
+    if (p.id_alg != ALGO_MLDSA87)
+        return false;
+
+    bool ok = false;
+    ok      = pqsig_verify(
+        SIG_ALG_NAME, p.identity_pk, sig_data,
+        std::vector<unsigned char>(p.signature.begin(), p.signature.end()));
+    if (!ok)
+    {
+        std::cerr << "[DEBUG] check_hello_signature_core: signature "
+                     "verification failed"
+                  << " peer_session_len=" << p.session_id.size()
+                  << " local_session_len=" << peer_globals::session_id().size()
+                  << " peer_identity_key="
+                  << compute_fingerprint_hex(p.identity_pk) << "\n";
+    }
+    return ok;
 }
 
 struct TimestampMs

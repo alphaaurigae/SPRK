@@ -52,19 +52,19 @@ static constexpr uint64_t MAX_BACKOFF_MS         = 60000;
 
 static void close_ssl_stream_if_any()
 {
-    const std::lock_guard<std::mutex> lk(ssl_io_mtx);
-    if (ssl_stream)
+    const std::lock_guard<std::mutex> lk(runtime_globals::ssl_io_mtx());
+    if (runtime_globals::ssl_stream())
     {
         std::error_code ec;
-        ssl_stream->lowest_layer().close(ec);
-        ssl_stream.reset();
+        runtime_globals::ssl_stream()->lowest_layer().close(ec);
+        runtime_globals::ssl_stream().reset();
     }
 }
 
 static void reset_peers_state()
 {
-    const std::lock_guard<std::mutex> lk(peers_mtx);
-    for (auto &kv : peers)
+    const std::lock_guard<std::mutex> lk(peer_globals::peers_mtx());
+    for (auto &kv : peer_globals::peers())
     {
         kv.second.ready      = false;
         kv.second.sent_hello = false;
@@ -88,11 +88,13 @@ static std::thread start_io_thread(asio::io_context &io, Work work)
             {
                 std::cerr << "[" << get_current_timestamp_ms()
                           << "] io_context exception: " << e.what() << "\n";
+                throw;
             }
             catch (...)
             {
                 std::cerr << "[" << get_current_timestamp_ms()
                           << "] io_context unknown exception\n";
+                throw;
             }
             std::cout << "[" << get_current_timestamp_ms()
                       << "] io_context thread exiting\n";
@@ -137,7 +139,7 @@ static bool attempt_connection(asio::io_context       &io,
                              [&connection_complete, &cv](bool success)
                              {
                                  if (success)
-                                     is_connected = true;
+                                     runtime_globals::is_connected() = true;
                                  connection_complete = true;
                                  cv.notify_one();
                              });
@@ -146,7 +148,7 @@ static bool attempt_connection(asio::io_context       &io,
     cv.wait_for(ul, std::chrono::milliseconds(100),
                 [&connection_complete] { return connection_complete.load(); });
 
-    return is_connected;
+    return runtime_globals::is_connected();
 }
 
 static void handle_post_connection()
@@ -162,7 +164,8 @@ static void run_reconnect_loop(asio::io_context       &io,
 {
     uint32_t reconnect_attempts = 0;
 
-    while (should_reconnect && reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
+    while (runtime_globals::should_reconnect() &&
+           reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
     {
         wait_backoff(reconnect_attempts);
 
@@ -188,7 +191,7 @@ try
 {
     const std::span<char *> args(argv, static_cast<std::size_t>(argc));
     const auto              config = parse_command_line_args(args);
-    my_username                    = config.username;
+    peer_globals::my_username()    = config.username;
 
     std::signal(SIGPIPE, SIG_IGN);
 
@@ -214,14 +217,14 @@ try
 
     crypto_init();
 
-    std::string cert_path =
-        std::string("sample/sample_test_cert/") + my_username + ".crt";
-    std::string key_path =
-        std::string("sample/sample_test_cert/") + my_username + "_tls.key";
+    std::string cert_path = std::string("sample/sample_test_cert/") +
+                            peer_globals::my_username() + ".crt";
+    std::string key_path = std::string("sample/sample_test_cert/") +
+                           peer_globals::my_username() + "_tls.key";
 
-    ssl_ctx = init_tls_client_context(cert_path, key_path,
-                                      "sample/sample_test_cert/ca.crt");
-    if (!ssl_ctx)
+    runtime_globals::ssl_ctx() = init_tls_client_context(
+        cert_path, key_path, "sample/sample_test_cert/ca.crt");
+    if (!runtime_globals::ssl_ctx())
     {
         std::cerr << "TLS context initialization failed\n";
         return 1;
@@ -243,7 +246,7 @@ try
     if (io_thread.joinable())
         io_thread.join();
 
-    ssl_ctx.reset();
+    runtime_globals::ssl_ctx().reset();
 
     return 0;
 }

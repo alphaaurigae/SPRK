@@ -26,14 +26,14 @@ struct FrameView
 
 static void broadcast_hello_to_peers(
     const SessionData &sd, std::shared_ptr<ClientState> sender,
-    const std::vector<unsigned char> &frame,
-    const std::unordered_map<std::string, SessionData> & /*sessions*/)
-
+    const std::vector<unsigned char>                   &frame,
+    const std::unordered_map<std::string, SessionData> &sessions)
 {
     auto ts = get_current_timestamp_ms();
     std::cerr << "[" << ts << "] broadcast_hello_to_peers: peers="
               << sd.clients_by_nick.size()
-              << " sender=" << (sender ? sender->username : "(null)") << "\n";
+              << " sender=" << (sender ? sender->username : "(null)")
+              << " total_sessions=" << sessions.size() << "\n";
 
     for (const auto &kv : sd.clients_by_nick)
     {
@@ -48,16 +48,12 @@ static void broadcast_hello_to_peers(
              target_name = kv.first](const std::error_code &ec, std::size_t)
             {
                 if (ec)
-                {
                     std::cerr << "[" << ts << "] [SERVER] Broadcast hello -> "
                               << target_name << " FAILED: " << ec.message()
                               << "\n";
-                }
                 else
-                {
                     std::cerr << "[" << ts << "] [SERVER] Broadcast hello from "
                               << sender_name << " to " << target_name << "\n";
-                }
             });
     }
 }

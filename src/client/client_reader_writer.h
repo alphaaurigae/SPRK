@@ -4,6 +4,7 @@
 #include "client_commands.h"
 #include "client_message_util.h"
 #include "client_peer_disconnect.h"
+#include "client_runtime.h"
 
 #include "shared_common_util.h"
 #include "shared_net_common_protocol.h"
@@ -30,8 +31,6 @@ std::vector<std::string>
 bool send_message_to_peer(const std::string &msg,
                           const RecipientFP &recipient_fp);
 
-extern std::shared_ptr<ssl_socket> ssl_stream;
-
 inline void asio_reader_loop()
 {
     auto frame_buf = std::make_shared<std::vector<unsigned char>>();
@@ -39,7 +38,7 @@ inline void asio_reader_loop()
     auto read_next = std::make_shared<std::function<void()>>();
     *read_next     = [frame_buf, read_next]()
     {
-        if (!is_connected.load())
+        if (!runtime_globals::is_connected().load())
         {
             std::cerr << "[DEBUG] asio_reader_loop: not connected, returning\n";
             return;
@@ -47,14 +46,15 @@ inline void asio_reader_loop()
 
         std::shared_ptr<ssl_socket> s;
         {
-            std::lock_guard<std::mutex> lk(ssl_io_mtx);
-            s = ssl_stream;
+            std::lock_guard<std::mutex> lk(runtime_globals::ssl_io_mtx());
+            s = runtime_globals::ssl_stream();
         }
 
         if (!s)
         {
-            std::cerr << "[DEBUG] asio_reader_loop: ssl_stream null\n";
-            is_connected = false;
+            std::cerr << "[DEBUG] asio_reader_loop: "
+                         "runtime_globals::ssl_stream() null\n";
+            runtime_globals::is_connected() = false;
             handle_disconnect(UsernameView{"(unknown)"}, FpHexView{""});
             return;
         }
@@ -66,7 +66,7 @@ inline void asio_reader_loop()
             {
                 if (ec)
                 {
-                    is_connected = false;
+                    runtime_globals::is_connected() = false;
                     handle_disconnect(UsernameView{"(unknown)"}, FpHexView{""});
                     return;
                 }
@@ -110,11 +110,13 @@ inline void asio_reader_loop()
                 {
                     std::cerr << "[ERROR] asio_reader_loop: parse exception: "
                               << e.what() << "\n";
+                    throw;
                 }
                 catch (...)
                 {
                     std::cerr << "[ERROR] asio_reader_loop: unknown parse "
                                  "exception\n";
+                    throw;
                 }
 
                 (*read_next)();
@@ -130,7 +132,7 @@ inline void writer_thread()
 {
     std::string line;
 
-    while (is_connected.load(std::memory_order_acquire))
+    while (runtime_globals::is_connected().load(std::memory_order_acquire))
     {
 
         // Input available, read it
@@ -143,7 +145,8 @@ inline void writer_thread()
                           << "] stdin closed\n";
 
                 std::cin.clear();
-                is_connected.store(false, std::memory_order_release);
+                runtime_globals::is_connected().store(
+                    false, std::memory_order_release);
                 break;
             }
 
@@ -155,11 +158,12 @@ inline void writer_thread()
                 continue;
             }
 
-            is_connected.store(false, std::memory_order_release);
+            runtime_globals::is_connected().store(false,
+                                                  std::memory_order_release);
             break;
         }
 
-        if (!is_connected.load(std::memory_order_acquire))
+        if (!runtime_globals::is_connected().load(std::memory_order_acquire))
             break;
 
         if (handle_client_command(line))

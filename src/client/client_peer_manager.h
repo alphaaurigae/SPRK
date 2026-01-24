@@ -55,18 +55,71 @@ static constexpr size_t   MAX_PEERS            = 256;
 static constexpr uint32_t RATE_LIMIT_MSGS      = 100;
 static constexpr uint64_t RATE_LIMIT_WINDOW_MS = 1000;
 
-inline std::unordered_map<std::string, PeerInfo> peers;
-inline std::unordered_map<std::string, std::unordered_set<std::string>>
-                     fps_by_username;
-inline std::mutex    peers_mtx;
-inline std::string   my_username;
-inline std::string   session_id;
-inline secure_vector my_eph_pk;
-inline secure_vector my_eph_sk;
+namespace peer_globals
+{
 
-inline secure_vector my_identity_pk;
-inline secure_vector my_identity_sk;
-inline std::string   my_fp_hex;
+inline std::unordered_map<std::string, PeerInfo> &peers() noexcept
+{
+    static std::unordered_map<std::string, PeerInfo> obj;
+    return obj;
+}
+
+inline std::unordered_map<std::string, std::unordered_set<std::string>> &
+fps_by_username() noexcept
+{
+    static std::unordered_map<std::string, std::unordered_set<std::string>> obj;
+    return obj;
+}
+
+inline std::mutex &peers_mtx() noexcept
+{
+    static std::mutex obj;
+    return obj;
+}
+
+inline std::string &my_username() noexcept
+{
+    static std::string obj;
+    return obj;
+}
+
+inline std::string &session_id() noexcept
+{
+    static std::string obj;
+    return obj;
+}
+
+inline secure_vector &my_eph_pk() noexcept
+{
+    static secure_vector obj;
+    return obj;
+}
+
+inline secure_vector &my_eph_sk() noexcept
+{
+    static secure_vector obj;
+    return obj;
+}
+
+inline secure_vector &my_identity_pk() noexcept
+{
+    static secure_vector obj;
+    return obj;
+}
+
+inline secure_vector &my_identity_sk() noexcept
+{
+    static secure_vector obj;
+    return obj;
+}
+
+inline std::string &my_fp_hex() noexcept
+{
+    static std::string obj;
+    return obj;
+}
+
+} // namespace peer_globals
 
 static bool check_rate_limit(PeerInfo &pi) noexcept
 {

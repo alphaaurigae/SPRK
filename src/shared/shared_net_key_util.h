@@ -4,6 +4,8 @@
 #include "shared_common_crypto.h"
 #include "shared_net_common_protocol.h"
 
+#include "client_peer_manager.h"
+
 #include <Poco/Buffer.h>
 #include <Poco/Exception.h>
 #include <Poco/File.h>
@@ -67,10 +69,11 @@ key_load_error_str(KeyLoadError e) noexcept
         "invalid key",    "no private key", "no public key"};
     return msgs[static_cast<size_t>(e)];
 }
-
+/*
 extern secure_vector my_identity_sk;
 extern secure_vector my_identity_pk;
-extern std::string   my_fp_hex;
+extern std::string my_fp_hex;
+*/
 
 inline PQKeypair derive_ephemeral_for_peer(const secure_vector &identity_sk,
                                            const SessionId     &session_id,
@@ -429,7 +432,7 @@ inline bool load_pem_private_key(const std::string &path, secure_vector &out_sk,
     out_pk    = std::move(pair.second);
     return true;
 }
-
+/*
 inline bool load_identity_keys(const char *key_path) noexcept
 {
     try
@@ -465,6 +468,49 @@ inline bool load_identity_keys(const char *key_path) noexcept
         std::cout << "Loaded PEM identity key: " << key_path << "\n";
         std::cout << "My fingerprint: " << my_fp_hex << "\n";
 
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cout << "Failed to load private/public key: " << e.what() << "\n";
+        return false;
+    }
+}
+
+*/
+inline bool load_identity_keys(const char *key_path) noexcept
+{
+    try
+    {
+        const auto result = load_pem_private_key_sync(key_path);
+        if (std::holds_alternative<KeyLoadError>(result))
+        {
+            const auto err = std::get<KeyLoadError>(result);
+            std::cerr << "Identity key load failed: " << key_load_error_str(err)
+                      << "\n";
+            return false;
+        }
+        auto pair   = std::get<std::pair<secure_vector, secure_vector>>(result);
+        auto raw_sk = std::move(pair.first);
+        auto raw_pk = std::move(pair.second);
+
+        peer_globals::my_identity_sk() = std::move(raw_sk);
+        if (peer_globals::my_identity_sk().empty())
+        {
+            throw std::runtime_error("identity secret key empty");
+        }
+
+        if (raw_pk.empty())
+        {
+            throw std::runtime_error("identity public key not present");
+        }
+
+        peer_globals::my_identity_pk() = std::move(raw_pk);
+        peer_globals::my_fp_hex() =
+            compute_fingerprint_hex(peer_globals::my_identity_pk());
+
+        std::cout << "Loaded PEM identity key: " << key_path << "\n";
+        std::cout << "My fingerprint: " << peer_globals::my_fp_hex() << "\n";
         return true;
     }
     catch (const std::exception &e)

@@ -1,6 +1,7 @@
 #ifndef CLIENT_COMMANDS_H
 #define CLIENT_COMMANDS_H
 
+#include "client_runtime.h"
 #include "shared_common_util.h"
 #include "shared_net_common_protocol.h"
 #include "shared_net_tls_frame_io.h"
@@ -33,17 +34,6 @@ struct RecipientFP final
 };
 
 #ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wglobal-constructors"
-#endif
-
-extern std::mutex                  ssl_io_mtx;
-extern std::shared_ptr<ssl_socket> ssl_stream;
-extern std::atomic_bool            is_connected;
-extern std::atomic_bool            should_reconnect;
-
-#ifdef __clang__
-#pragma clang diagnostic pop
 #endif
 
 inline std::vector<std::string> parse_recipient_list(const std::string &input)
@@ -81,8 +71,8 @@ inline bool handle_client_command(const std::string &line)
 
     if (line == "q")
     {
-        should_reconnect = false;
-        is_connected     = false;
+        runtime_globals::should_reconnect() = false;
+        runtime_globals::is_connected()     = false;
         return true;
     }
 
@@ -94,20 +84,20 @@ inline bool handle_client_command(const std::string &line)
         auto frame_ptr = std::make_shared<std::vector<unsigned char>>(f);
 
         {
-            std::lock_guard<std::mutex> lk(ssl_io_mtx);
-            if (!ssl_stream)
+            std::lock_guard<std::mutex> lk{runtime_globals::ssl_io_mtx()};
+            if (!runtime_globals::ssl_stream())
             {
-                is_connected = false;
+                runtime_globals::is_connected() = false;
                 handle_disconnect(UsernameView{""}, FpHexView{""});
                 return true;
             }
             async_write_frame(
-                ssl_stream, frame_ptr,
+                runtime_globals::ssl_stream(), frame_ptr,
                 [frame_ptr](const std::error_code &ec, std::size_t)
                 {
                     if (ec)
                     {
-                        is_connected = false;
+                        runtime_globals::is_connected() = false;
                         handle_disconnect(UsernameView{""}, FpHexView{""});
                     }
                 });
@@ -127,20 +117,20 @@ inline bool handle_client_command(const std::string &line)
         auto frame_ptr = std::make_shared<std::vector<unsigned char>>(req);
 
         {
-            std::lock_guard<std::mutex> lk(ssl_io_mtx);
-            if (!ssl_stream)
+            std::lock_guard<std::mutex> lk(runtime_globals::ssl_io_mtx());
+            if (!runtime_globals::ssl_stream())
             {
-                is_connected = false;
+                runtime_globals::is_connected() = false;
                 handle_disconnect(UsernameView{who}, FpHexView{""});
                 return true;
             }
             async_write_frame(
-                ssl_stream, frame_ptr,
+                runtime_globals::ssl_stream(), frame_ptr,
                 [frame_ptr, who](const std::error_code &ec, std::size_t)
                 {
                     if (ec)
                     {
-                        is_connected = false;
+                        runtime_globals::is_connected() = false;
                         handle_disconnect(UsernameView{who}, FpHexView{""});
                     }
                 });

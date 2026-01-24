@@ -29,7 +29,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    const int        port = std::stoi(argv[1]);
+    int port{};
+    port = std::stoi(argv[1]);
     asio::io_context io;
     std::error_code  ec;
 
@@ -48,8 +49,8 @@ int main(int argc, char **argv)
         std::cerr << "TLS server context initialization failed\n";
         return 1;
     }
-    std::unordered_map<std::string, SessionData> sessions;
 
+    std::unordered_map<std::string, SessionData> sessions;
     std::cout << "Server listening on port " << port
               << " with post-quantum TLS\n";
     std::function<void()> accept_loop = [&]()

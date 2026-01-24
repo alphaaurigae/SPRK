@@ -90,9 +90,9 @@ static std::string validate_hello_basics(const Parsed &p, HelloBasicsOut &out)
     sig_data.insert(sig_data.end(), p.eph_pk.begin(), p.eph_pk.end());
     sig_data.insert(sig_data.end(), p.session_id.begin(), p.session_id.end());
 
-    const bool sig_ok =
-        (p.id_alg == ALGO_MLDSA87) &&
-        pqsig_verify(SIG_ALG_NAME, p.identity_pk, sig_data, p.signature);
+    bool sig_ok{false};
+    sig_ok = (p.id_alg == ALGO_MLDSA87) &&
+             pqsig_verify(SIG_ALG_NAME, p.identity_pk, sig_data, p.signature);
 
     if (!sig_ok)
     {

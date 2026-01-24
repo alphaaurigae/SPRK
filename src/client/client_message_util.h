@@ -34,12 +34,6 @@ extern std::mutex                  ssl_io_mtx;
 extern std::shared_ptr<ssl_socket> ssl_stream;
 extern std::atomic_bool            is_connected;
 
-bool validate_username(PeerNameView peer_name, MsU ms);
-bool check_peer_limits(PeerKeyView peer_key, MsU ms);
-bool check_rate_and_signature(PeerInfo &pi, const Parsed &p,
-                              PeerNameView peer_name, MsU ms);
-struct ExpectedLengths;
-
 bool        validate_eph_pk_length(const Parsed &p, PeerNameView peer_name,
                                    ExpectedPkLen expected_pk_len, MsU ms);
 bool        handle_encaps_present(PeerInfo &pi, const Parsed &p,
@@ -115,9 +109,10 @@ inline void process_pubkey_response(const Parsed &p)
                 fps_by_username[p.username].insert(fhex);
             }
         }
-        catch (const std::exception &e)
+
+        catch (const std::exception &)
         {
-            dev_println("fingerprint error: " + std::string(e.what()));
+            dev_println("fingerprint error: fingerprint computation failed");
         }
     }
     std::cout << "pubkey " << p.username << " " << hexpk << "\n";
@@ -125,8 +120,8 @@ inline void process_pubkey_response(const Parsed &p)
 
 struct PeerFpHexOut
 {
-    std::string &v;
-    explicit PeerFpHexOut(std::string &ref) noexcept : v(ref) {}
+    std::string *v{};
+    explicit PeerFpHexOut(std::string &ref) noexcept : v{&ref} {}
 };
 
 struct PeerNameIn
@@ -139,7 +134,7 @@ inline std::optional<std::string>
 validate_and_compute_peer_key(const Parsed &p, PeerFpHexOut peer_fp_hex,
                               PeerNameIn peer_name, MsU ms)
 {
-    const auto key_opt = compute_peer_key(p, peer_fp_hex.v);
+    const auto key_opt = compute_peer_key(p, *peer_fp_hex.v);
     if (!key_opt.has_value())
     {
         dev_println("[" + std::to_string(ms.v) +
@@ -164,8 +159,8 @@ struct PeerFpHexIn
 
 struct FpsSetRef
 {
-    std::unordered_set<std::string> &v;
-    explicit FpsSetRef(std::unordered_set<std::string> &ref) noexcept : v(ref)
+    std::unordered_set<std::string> *v{};
+    explicit FpsSetRef(std::unordered_set<std::string> &ref) noexcept : v{&ref}
     {
     }
 };
@@ -176,17 +171,17 @@ inline bool update_peer_state(PeerInfo &pi, const Parsed &p,
                               MsU ms)
 {
     update_peer_info(pi, PeerNameStr{peer_name.v}, PeerFpHexStr{peer_fp_hex.v},
-                     fps_set.v);
+                     *fps_set.v);
 
     if (!check_peer_limits(PeerKeyView{peer_key.v}, ms))
         return false;
     if (!check_rate_and_signature(pi, p, PeerNameView{peer_name.v}, ms))
         return false;
 
-    bool       pk_changed     = false;
-    bool       has_new_encaps = false;
-    const bool needs_key_handling =
-        detect_key_changes(pi, p, pk_changed, has_new_encaps);
+    bool pk_changed         = false;
+    bool has_new_encaps     = false;
+    bool needs_key_handling = false;
+    needs_key_handling = detect_key_changes(pi, p, pk_changed, has_new_encaps);
     if (pk_changed)
         handle_rekey(pi, PeerNameStr{peer_name.v}, ms);
     if (!needs_key_handling && pi.ready)
@@ -266,7 +261,8 @@ inline bool process_peer_encaps(const Parsed &p, PeerNameIn peer_name,
 
     if (!p.encaps.empty() || (initiator.v && !pi.sent_hello))
     {
-        const bool handled =
+        bool handled = false;
+        handled =
             initiator.v
                 ? try_handle_initiator_encaps(pi, p, PeerNameView{peer_name.v},
                                               KeyContextView{key_context.v},
@@ -448,8 +444,10 @@ inline bool handle_sequence(PeerInfo &pi, SeqU64 seq, MsU ms,
         return false;
     }
 
-    const bool jitter_detected = is_sequence_in_jitter_range(
-        seq.v, pi.recv_seq, DEFAULT_SEQ_JITTER_BUFFER);
+    bool jitter_detected = false;
+    jitter_detected      = is_sequence_in_jitter_range(seq.v, pi.recv_seq,
+                                                       DEFAULT_SEQ_JITTER_BUFFER);
+
     if (jitter_detected) [[unlikely]]
     {
         dev_println("[" + std::to_string(ms.v) +
@@ -535,10 +533,11 @@ inline void handle_chat(const Parsed &p)
         pi->recv_seq++;
         pi->last_recv_time = ms;
     }
-    catch (const std::exception &e)
+    catch (const std::exception &)
     {
         std::cerr << "[" << ms << "] decrypt failed from=" << peer_from
-                  << " seq=" << p.seq << " error=" << e.what() << "\n";
+                  << " seq=" << p.seq << "\n";
+        return;
     }
 }
 

@@ -112,7 +112,6 @@ inline void asio_reader_loop() {
   (*read_next)();
 }
 
-// "I am the fire to your ice.", "I do what I must to return home."
 inline void writer_thread() {
   std::string line;
 

@@ -15,11 +15,44 @@
 
 #include <string>
 
-#ifdef USE_LIBOQS
-#include <oqs/oqs.h>
-#endif
-
 struct PeerInfo;
+
+static void send_current_hello_announcement() {
+  std::vector<unsigned char> sig_data;
+  sig_data.reserve(peer_globals::my_eph_pk().size() +
+                   peer_globals::session_id().size() +
+                   peer_globals::my_username().size());
+  sig_data.insert(sig_data.end(), peer_globals::my_eph_pk().begin(),
+                  peer_globals::my_eph_pk().end());
+  sig_data.insert(sig_data.end(), peer_globals::session_id().begin(),
+                  peer_globals::session_id().end());
+  sig_data.insert(sig_data.end(), peer_globals::my_username().begin(),
+                  peer_globals::my_username().end());
+
+  const std::vector<unsigned char> signature_vec =
+      pqsig_sign(SIG_ALG_NAME,
+                std::span<const unsigned char>(peer_globals::my_identity_sk()),
+                sig_data);
+
+  const std::vector<unsigned char> identity_pk_vec(
+      peer_globals::my_identity_pk().begin(),
+      peer_globals::my_identity_pk().end());
+
+  const auto hello_frame = build_hello(
+      peer_globals::my_username(), ALGO_KEM_ALG_NAME,
+      std::vector<unsigned char>(peer_globals::my_eph_pk().begin(),
+                                peer_globals::my_eph_pk().end()),
+      ALGO_MLDSA87, identity_pk_vec, signature_vec,
+      std::vector<unsigned char>{}, std::vector<unsigned char>{},
+      peer_globals::session_id());
+
+  auto frame_ptr = std::make_shared<std::vector<unsigned char>>(hello_frame);
+  const std::lock_guard<std::mutex> io_lk(runtime_globals::ssl_io_mtx());
+  if (!runtime_globals::ssl_stream())
+    return;
+  async_write_frame(runtime_globals::ssl_stream(), frame_ptr,
+                    [frame_ptr](const std::error_code &, std::size_t) {});
+}
 
 static void rotate_ephemeral_if_needed(const std::string &peer_fp) {
   const std::lock_guard<std::mutex> lk(peer_globals::peers_mtx());
@@ -30,48 +63,32 @@ static void rotate_ephemeral_if_needed(const std::string &peer_fp) {
 
   const auto ms = get_current_timestamp_ms();
   auto eph_pair = pqkem_keypair(KEM_ALG_NAME);
-  secure_vector new_pk = eph_pair.first;
-  secure_vector new_sk = eph_pair.second;
+  peer_globals::my_eph_pk() = eph_pair.first;
+  peer_globals::my_eph_sk() = eph_pair.second;
 
-  std::vector<unsigned char> sig_data;
-  sig_data.reserve(new_pk.size() + peer_globals::session_id().size());
-  sig_data.insert(sig_data.end(), new_pk.begin(), new_pk.end());
-  sig_data.insert(sig_data.end(), peer_globals::session_id().begin(),
-                  peer_globals::session_id().end());
+  send_current_hello_announcement();
 
-  const std::vector<unsigned char> signature_vec = pqsig_sign(
-      SIG_ALG_NAME,
-      std::vector<unsigned char>(peer_globals::my_identity_sk().begin(),
-                                 peer_globals::my_identity_sk().end()),
-      sig_data);
-
-  const std::vector<unsigned char> identity_pk_vec(
-      peer_globals::my_identity_pk().begin(),
-      peer_globals::my_identity_pk().end());
-
-  const auto hello_frame =
-      build_hello(peer_globals::my_username(), ALGO_KEM_ALG_NAME,
-                  std::vector<unsigned char>(new_pk.begin(), new_pk.end()),
-                  ALGO_MLDSA87, identity_pk_vec, signature_vec,
-                  std::vector<unsigned char>{}, peer_globals::session_id());
-
-  auto frame_ptr = std::make_shared<std::vector<unsigned char>>(hello_frame);
-  {
-    const std::lock_guard<std::mutex> lk(peer_globals::peers_mtx());
-    if (!runtime_globals::ssl_stream())
-      return;
-    async_write_frame(runtime_globals::ssl_stream(), frame_ptr,
-                      [frame_ptr](const std::error_code &, std::size_t) {});
-
-    peer_globals::my_eph_pk() = new_pk;
-    peer_globals::my_eph_sk() = new_sk;
-    const auto it = peer_globals::peers().find(peer_fp);
-    if (it != peer_globals::peers().end()) {
-      auto &pi = it->second;
-      pi.send_seq = 0;
-      pi.ready = false;
-    }
+  // This client's ephemeral keypair (peer_globals::my_eph_pk()/my_eph_sk())
+  // is shared by every peer relationship -- the wire protocol has exactly
+  // one eph_pk per username, broadcast session-wide. Rotating it therefore
+  // invalidates every already-derived session, not only the one whose
+  // send_seq crossed REKEY_INTERVAL. Confirmed via a live 3-party test:
+  // resetting only the triggering peer left every OTHER peer for whom this
+  // client is the static initiator permanently stuck at "awaiting encaps",
+  // because nothing ever re-triggered this client's own initiator-side
+  // reaction toward them. Resetting every peer here, combined with the
+  // responder-side reflex resend in client_message_util.h's handle_hello,
+  // makes every affected relationship redo its KEM exchange correctly.
+  for (auto &kv : peer_globals::peers()) {
+    auto &other = kv.second;
+    other.ready = false;
+    other.sent_hello = false;
+    other.send_seq = 0;
+    other.recv_seq = 0;
+    other.keys.send_key.clear();
+    other.keys.recv_key.clear();
   }
+
   dev_println("[" + std::to_string(ms) +
               "] rotated ephemeral key for peer_fp " + peer_fp);
 }
@@ -167,15 +184,17 @@ static bool try_handle_decaps_and_set_ready(PeerInfo &pi, const Parsed &p,
   try {
     const secure_vector shared =
         pqkem_decaps(KEM_ALG_NAME, p.encaps, peer_globals::my_eph_sk());
-    pi.sk = derive_shared_key_from_secret(shared, std::string(key_context.v));
+    pi.keys = derive_directional_keys_from_secret(
+        shared, std::string(key_context.v), /*i_am_initiator=*/false);
     std::cerr << "[KEY] Derived for " << std::string(peer_name.v)
-              << " key=" << to_hex(pi.sk.key).substr(0, 32)
+              << " send=" << to_hex(pi.keys.send_key).substr(0, 16)
+              << " recv=" << to_hex(pi.keys.recv_key).substr(0, 16)
               << " context=" << std::string(key_context.v) << " (encaps)\n";
     dev_println("[" + std::to_string(ms.v) +
                 "] DEBUG decaps: my=" + peer_globals::my_username() +
                 " peer=" + std::string(peer_name.v) +
                 " context=" + std::string(key_context.v) +
-                " keysize=" + std::to_string(pi.sk.key.size()));
+                " keysize=" + std::to_string(pi.keys.recv_key.size()));
     pi.ready = true;
     pi.identity_verified = true;
     return true;
@@ -209,30 +228,34 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
     const std::vector<unsigned char> encaps_ct = enc_pair.first;
     const secure_vector shared = enc_pair.second;
 
-    pi.sk = derive_shared_key_from_secret(shared, std::string(key_context.v));
+    pi.keys = derive_directional_keys_from_secret(
+        shared, std::string(key_context.v), /*i_am_initiator=*/true);
     std::cerr << "[KEY] Derived for " << std::string(peer_name.v)
-              << " key=" << to_hex(pi.sk.key).substr(0, 32)
+              << " send=" << to_hex(pi.keys.send_key).substr(0, 16)
+              << " recv=" << to_hex(pi.keys.recv_key).substr(0, 16)
               << " context=" << std::string(key_context.v) << " (encaps)\n";
 
     dev_println("[" + std::to_string(ms.v) +
                 "] DEBUG encaps: my=" + peer_globals::my_username() +
                 " peer=" + std::string(peer_name.v) +
                 " context=" + std::string(key_context.v) +
-                " keysize=" + std::to_string(pi.sk.key.size()));
+                " keysize=" + std::to_string(pi.keys.send_key.size()));
 
     pi.ready = true;
     pi.identity_verified = true;
 
     std::vector<unsigned char> sig_data2;
-    sig_data2.reserve(peer_globals::my_eph_pk().size() + p.session_id.size());
+    sig_data2.reserve(peer_globals::my_eph_pk().size() + p.session_id.size() +
+                      peer_globals::my_username().size());
     sig_data2.insert(sig_data2.end(), peer_globals::my_eph_pk().begin(),
                      peer_globals::my_eph_pk().end());
     sig_data2.insert(sig_data2.end(), p.session_id.begin(), p.session_id.end());
+    sig_data2.insert(sig_data2.end(), peer_globals::my_username().begin(),
+                     peer_globals::my_username().end());
 
     const std::vector<unsigned char> signature_vec = pqsig_sign(
         SIG_ALG_NAME,
-        std::vector<unsigned char>(peer_globals::my_identity_sk().begin(),
-                                   peer_globals::my_identity_sk().end()),
+        std::span<const unsigned char>(peer_globals::my_identity_sk()),
         sig_data2);
 
     const std::vector<unsigned char> identity_pk_vec(
@@ -242,7 +265,8 @@ static bool try_handle_initiator_encaps(PeerInfo &pi, const Parsed &p,
         peer_globals::my_username(), ALGO_KEM_ALG_NAME,
         std::vector<unsigned char>(peer_globals::my_eph_pk().begin(),
                                    peer_globals::my_eph_pk().end()),
-        ALGO_MLDSA87, identity_pk_vec, signature_vec, encaps_ct, p.session_id);
+        ALGO_MLDSA87, identity_pk_vec, signature_vec, encaps_ct,
+        from_hex(peer_fp_hex), p.session_id);
 
     auto frame_ptr = std::make_shared<std::vector<unsigned char>>(reply);
     {
@@ -274,11 +298,6 @@ bool validate_username(PeerNameView peer_name, MsU ms) {
                 "] REJECTED: self-connection attempt");
     return false;
   }
-  if (std::string(peer_name.v) == peer_globals::my_username()) {
-    dev_println("[" + std::to_string(ms.v) +
-                "] REJECTED: self-messaging blocked");
-    return false;
-  }
   return true;
 }
 
@@ -296,9 +315,10 @@ bool check_peer_limits(PeerKeyView peer_key, MsU ms) {
 
 inline bool check_hello_signature_core(const Parsed &p) {
   std::vector<unsigned char> sig_data;
-  sig_data.reserve(p.eph_pk.size() + p.session_id.size());
+  sig_data.reserve(p.eph_pk.size() + p.session_id.size() + p.username.size());
   sig_data.insert(sig_data.end(), p.eph_pk.begin(), p.eph_pk.end());
   sig_data.insert(sig_data.end(), p.session_id.begin(), p.session_id.end());
+  sig_data.insert(sig_data.end(), p.username.begin(), p.username.end());
 
   if (p.id_alg != ALGO_MLDSA87)
     return false;
@@ -353,19 +373,9 @@ struct ExpectedLengths {
 };
 
 bool get_expected_lengths(ExpectedLengths &lengths, uint64_t ms) {
-#ifdef USE_LIBOQS
-  OQS_KEM *kem = OQS_KEM_new(KEM_ALG_NAME);
-  if (kem == nullptr) {
-    dev_println("[" + std::to_string(ms) + "] REJECTED: kem init failed");
-    return false;
-  }
-  lengths.pk_len = kem->length_public_key;
-  lengths.ct_len = kem->length_ciphertext;
-  OQS_KEM_free(kem);
-#else
-  lengths.pk_len = 0;
-  lengths.ct_len = 0;
-#endif
+  (void)ms;
+  lengths.pk_len = ML_KEM_768_PUBLIC_KEY_LEN;
+  lengths.ct_len = ML_KEM_768_CIPHERTEXT_LEN;
   return true;
 }
 

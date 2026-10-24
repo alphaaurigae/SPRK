@@ -21,13 +21,6 @@ should_rekey(uint32_t sequence_number,
   return sequence_number >= rekey_interval;
 }
 
-[[nodiscard]] constexpr bool is_sequence_in_jitter_range(
-    uint32_t received_seq, uint32_t expected_seq,
-    uint32_t jitter_buffer = DEFAULT_SEQ_JITTER_BUFFER) noexcept {
-  return received_seq > expected_seq &&
-         (received_seq - expected_seq) <= jitter_buffer;
-}
-
 [[nodiscard]] constexpr bool is_sequence_gap_valid(
     uint32_t received_seq, uint32_t expected_seq,
     uint32_t max_gap = DEFAULT_MAX_SEQ_GAP,
@@ -220,21 +213,13 @@ public:
   void schedule_rekey(std::chrono::milliseconds delay,
                       std::function<void()> callback) {
     auto timer = std::make_shared<OneShotTimer>(io_);
-
-    // Keep timer in pending list so cleanup can prune it later
     pending_timers_.push_back(timer);
-
-    // Capture timer as shared_ptr to keep it alive until callback completes
     timer->start(delay, [cb = std::move(callback),
                          timer_keepalive = timer](const std::error_code &ec) {
       if (!ec && cb) {
         cb();
       }
-      // timer_keepalive goes out of scope here, allowing
-      // timer destruction
     });
-
-    // Periodic cleanup of completed timers (not immediate)
     cleanup_completed_timers();
   }
 

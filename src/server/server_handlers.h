@@ -121,9 +121,11 @@ handle_hello_message(std::shared_ptr<ClientState> client, ParsedView p,
     Parsed p2 = parse_payload(existing_hello.data() + 4, existing_payload_len);
 
     std::vector<unsigned char> empty_encaps;
+    std::vector<unsigned char> empty_target_fp;
     auto stripped =
         build_hello(p2.username, ALGO_KYBER512, p2.eph_pk, p2.id_alg,
-                    p2.identity_pk, p2.signature, empty_encaps, p2.session_id);
+                    p2.identity_pk, p2.signature, empty_encaps,
+                    empty_target_fp, p2.session_id);
 
     auto frame_copy =
         std::make_shared<const std::vector<unsigned char>>(stripped);

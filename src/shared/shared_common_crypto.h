@@ -7,10 +7,12 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <openssl/core_names.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/kdf.h>
+#include <openssl/param_build.h>
 #include <openssl/rand.h>
 
 #include <span>
@@ -18,10 +20,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#ifdef USE_LIBOQS
-#include <oqs/oqs.h>
-#endif
 
 inline constexpr std::size_t KEY_LEN = 32;
 inline constexpr std::size_t TAG_LEN = 16;
@@ -33,9 +31,6 @@ inline constexpr std::size_t MIN_FP_PREFIX_HEX = 16;
 inline std::string make_symmetric_message_aad(std::string_view sender_fp,
                                               std::string_view receiver_fp,
                                               uint32_t seq) {
-  // CRITICAL: AAD must match session key derivation order
-  // Session keys are derived with sorted fingerprints (a < b)
-  // So AAD must also use sorted order, NOT sender/receiver order
   std::string a(sender_fp);
   std::string b(receiver_fp);
   if (a > b)
@@ -99,41 +94,55 @@ struct EVP_PKEY_CTX_Deleter {
   }
 };
 
-#ifdef USE_LIBOQS
-struct OQS_KEM_Deleter {
-  void operator()(OQS_KEM *kem) const noexcept {
-    if (kem != nullptr) {
-      OQS_KEM_free(kem);
+struct EVP_PKEY_Deleter {
+  void operator()(EVP_PKEY *p) const noexcept {
+    if (p != nullptr) {
+      EVP_PKEY_free(p);
     }
   }
 };
 
-struct OQS_SIG_Deleter {
-  void operator()(OQS_SIG *sig) const noexcept {
-    if (sig != nullptr) {
-      OQS_SIG_free(sig);
+struct EVP_SIGNATURE_Deleter {
+  void operator()(EVP_SIGNATURE *p) const noexcept {
+    if (p != nullptr) {
+      EVP_SIGNATURE_free(p);
     }
   }
 };
-#endif
+
+struct OSSL_PARAM_BLD_Deleter {
+  void operator()(OSSL_PARAM_BLD *p) const noexcept {
+    if (p != nullptr) {
+      OSSL_PARAM_BLD_free(p);
+    }
+  }
+};
+
+struct OSSL_PARAM_Deleter {
+  void operator()(OSSL_PARAM *p) const noexcept {
+    if (p != nullptr) {
+      OSSL_PARAM_free(p);
+    }
+  }
+};
 
 using EVP_CIPHER_CTX_ptr =
     std::unique_ptr<EVP_CIPHER_CTX, EVP_CIPHER_CTX_Deleter>;
 using EVP_MD_CTX_ptr = std::unique_ptr<EVP_MD_CTX, EVP_MD_CTX_Deleter>;
 using EVP_PKEY_CTX_ptr = std::unique_ptr<EVP_PKEY_CTX, EVP_PKEY_CTX_Deleter>;
-
-#ifdef USE_LIBOQS
-using OQS_KEM_ptr = std::unique_ptr<OQS_KEM, OQS_KEM_Deleter>;
-using OQS_SIG_ptr = std::unique_ptr<OQS_SIG, OQS_SIG_Deleter>;
-#endif
+using EVP_PKEY_ptr = std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter>;
+using EVP_SIGNATURE_ptr = std::unique_ptr<EVP_SIGNATURE, EVP_SIGNATURE_Deleter>;
+using OSSL_PARAM_BLD_ptr = std::unique_ptr<OSSL_PARAM_BLD, OSSL_PARAM_BLD_Deleter>;
+using OSSL_PARAM_ptr = std::unique_ptr<OSSL_PARAM, OSSL_PARAM_Deleter>;
 
 struct Keypair {
   secure_vector pk;
   secure_vector sk;
 };
 
-struct SessionKey {
-  secure_vector key;
+struct DirectionalSessionKeys {
+  secure_vector send_key;
+  secure_vector recv_key;
 };
 
 template <std::size_t N> class SecureArray {
@@ -172,76 +181,185 @@ inline void crypto_init() {
 #else
   OPENSSL_init_crypto(0, nullptr);
 #endif
-#ifdef USE_LIBOQS
-  /* OQS requires no explicit init */
-#endif
 }
 
+namespace pqc_detail {
+
+[[nodiscard]] inline EVP_PKEY_ptr
+pkey_from_public_bytes(std::string_view alg, std::span<const unsigned char> pub) {
+  EVP_PKEY_CTX_ptr ctx(
+      EVP_PKEY_CTX_new_from_name(nullptr, std::string(alg).c_str(), nullptr));
+  if (!ctx) {
+    throw std::runtime_error("EVP_PKEY_CTX_new_from_name failed for " +
+                             std::string(alg));
+  }
+  if (EVP_PKEY_fromdata_init(ctx.get()) != 1) {
+    throw std::runtime_error("EVP_PKEY_fromdata_init failed for " +
+                             std::string(alg));
+  }
+  OSSL_PARAM_BLD_ptr bld(OSSL_PARAM_BLD_new());
+  if (!bld) {
+    throw std::runtime_error("OSSL_PARAM_BLD_new failed");
+  }
+  if (OSSL_PARAM_BLD_push_octet_string(bld.get(), OSSL_PKEY_PARAM_PUB_KEY,
+                                       pub.data(), pub.size()) != 1) {
+    throw std::runtime_error("OSSL_PARAM_BLD_push_octet_string(pub) failed");
+  }
+  OSSL_PARAM_ptr params(OSSL_PARAM_BLD_to_param(bld.get()));
+  if (!params) {
+    throw std::runtime_error("OSSL_PARAM_BLD_to_param failed");
+  }
+  EVP_PKEY *raw = nullptr;
+  if (EVP_PKEY_fromdata(ctx.get(), &raw, EVP_PKEY_PUBLIC_KEY, params.get()) !=
+          1 ||
+      raw == nullptr) {
+    throw std::runtime_error("EVP_PKEY_fromdata (public) failed for " +
+                             std::string(alg));
+  }
+  return EVP_PKEY_ptr(raw);
+}
+
+[[nodiscard]] inline EVP_PKEY_ptr
+pkey_from_private_bytes(std::string_view alg,
+                        std::span<const unsigned char> priv,
+                        std::span<const unsigned char> pub = {}) {
+  EVP_PKEY_CTX_ptr ctx(
+      EVP_PKEY_CTX_new_from_name(nullptr, std::string(alg).c_str(), nullptr));
+  if (!ctx) {
+    throw std::runtime_error("EVP_PKEY_CTX_new_from_name failed for " +
+                             std::string(alg));
+  }
+  if (EVP_PKEY_fromdata_init(ctx.get()) != 1) {
+    throw std::runtime_error("EVP_PKEY_fromdata_init failed for " +
+                             std::string(alg));
+  }
+  OSSL_PARAM_BLD_ptr bld(OSSL_PARAM_BLD_new());
+  if (!bld) {
+    throw std::runtime_error("OSSL_PARAM_BLD_new failed");
+  }
+  if (OSSL_PARAM_BLD_push_octet_string(bld.get(), OSSL_PKEY_PARAM_PRIV_KEY,
+                                       priv.data(), priv.size()) != 1) {
+    throw std::runtime_error("OSSL_PARAM_BLD_push_octet_string(priv) failed");
+  }
+  if (!pub.empty() &&
+      OSSL_PARAM_BLD_push_octet_string(bld.get(), OSSL_PKEY_PARAM_PUB_KEY,
+                                       pub.data(), pub.size()) != 1) {
+    throw std::runtime_error("OSSL_PARAM_BLD_push_octet_string(pub) failed");
+  }
+  OSSL_PARAM_ptr params(OSSL_PARAM_BLD_to_param(bld.get()));
+  if (!params) {
+    throw std::runtime_error("OSSL_PARAM_BLD_to_param failed");
+  }
+  EVP_PKEY *raw = nullptr;
+  if (EVP_PKEY_fromdata(ctx.get(), &raw, EVP_PKEY_KEYPAIR, params.get()) !=
+          1 ||
+      raw == nullptr) {
+    throw std::runtime_error("EVP_PKEY_fromdata (private) failed for " +
+                             std::string(alg));
+  }
+  return EVP_PKEY_ptr(raw);
+}
+
+[[nodiscard]] inline secure_vector get_priv_octets(EVP_PKEY *pkey) {
+  size_t len = 0;
+  if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, nullptr,
+                                      0, &len) != 1) {
+    throw std::runtime_error(
+        "EVP_PKEY_get_octet_string_param(priv) size query failed");
+  }
+  secure_vector out(len);
+  size_t out_len = 0;
+  if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY,
+                                      out.data(), out.size(), &out_len) != 1) {
+    throw std::runtime_error("EVP_PKEY_get_octet_string_param(priv) failed");
+  }
+  out.resize(out_len);
+  return out;
+}
+
+[[nodiscard]] inline std::vector<unsigned char> get_pub_octets(EVP_PKEY *pkey) {
+  size_t len = 0;
+  if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, nullptr,
+                                      0, &len) != 1) {
+    throw std::runtime_error(
+        "EVP_PKEY_get_octet_string_param(pub) size query failed");
+  }
+  std::vector<unsigned char> out(len);
+  size_t out_len = 0;
+  if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY,
+                                      out.data(), out.size(), &out_len) != 1) {
+    throw std::runtime_error("EVP_PKEY_get_octet_string_param(pub) failed");
+  }
+  out.resize(out_len);
+  return out;
+}
+
+} // namespace pqc_detail
+
 inline std::pair<secure_vector, secure_vector>
-pqkem_keypair(std::string_view oqs_alg) {
-#ifdef USE_LIBOQS
-  OQS_KEM_ptr kem(OQS_KEM_new(std::string(oqs_alg).c_str()));
-  if (kem == nullptr) {
-    throw std::runtime_error("Failed to create KEM object for algorithm: " +
-                             std::string(oqs_alg));
-  }
-
-  secure_vector pk(kem->length_public_key);
-  secure_vector sk(kem->length_secret_key);
-
-  if (OQS_KEM_keypair(kem.get(), pk.data(), sk.data()) != OQS_SUCCESS) {
+pqkem_keypair(std::string_view alg) {
+  EVP_PKEY *raw = EVP_PKEY_Q_keygen(nullptr, nullptr, std::string(alg).c_str());
+  if (raw == nullptr) {
     throw std::runtime_error("Failed to generate keypair for algorithm: " +
-                             std::string(oqs_alg));
+                             std::string(alg));
   }
-
+  EVP_PKEY_ptr pkey(raw);
+  auto pub = pqc_detail::get_pub_octets(pkey.get());
+  secure_vector pk(pub.begin(), pub.end());
+  secure_vector sk = pqc_detail::get_priv_octets(pkey.get());
   return {std::move(pk), std::move(sk)};
-#else
-  throw std::runtime_error("pqkem not enabled at build for " +
-                           std::string(oqs_alg));
-#endif
 }
 
 inline std::pair<std::vector<unsigned char>, secure_vector>
-pqkem_encaps(std::string_view oqs_alg, std::span<const unsigned char> peer_pk) {
-#ifdef USE_LIBOQS
-  OQS_KEM_ptr kem(OQS_KEM_new(std::string(oqs_alg).c_str()));
-  if (kem == nullptr) {
-    throw std::runtime_error("pqkem new failed");
+pqkem_encaps(std::string_view alg, std::span<const unsigned char> peer_pk) {
+  auto peer_pkey = pqc_detail::pkey_from_public_bytes(alg, peer_pk);
+  EVP_PKEY_CTX_ptr ctx(EVP_PKEY_CTX_new_from_pkey(nullptr, peer_pkey.get(), nullptr));
+  if (!ctx) {
+    throw std::runtime_error("pqkem encaps: EVP_PKEY_CTX_new_from_pkey failed");
   }
-  std::vector<unsigned char> ct(kem->length_ciphertext);
-  secure_vector ss(kem->length_shared_secret);
-  if (OQS_KEM_encaps(kem.get(), ct.data(), ss.data(), peer_pk.data()) !=
-      OQS_SUCCESS) {
+  if (EVP_PKEY_encapsulate_init(ctx.get(), nullptr) != 1) {
+    throw std::runtime_error("pqkem encaps init failed");
+  }
+  size_t wrapped_len = 0;
+  size_t secret_len = 0;
+  if (EVP_PKEY_encapsulate(ctx.get(), nullptr, &wrapped_len, nullptr,
+                           &secret_len) != 1) {
+    throw std::runtime_error("pqkem encaps size query failed");
+  }
+  std::vector<unsigned char> ct(wrapped_len);
+  secure_vector ss(secret_len);
+  if (EVP_PKEY_encapsulate(ctx.get(), ct.data(), &wrapped_len, ss.data(),
+                           &secret_len) != 1) {
     throw std::runtime_error("pqkem encaps failed");
   }
+  ct.resize(wrapped_len);
+  ss.resize(secret_len);
   return {std::move(ct), std::move(ss)};
-#else
-  (void)oqs_alg;
-  (void)peer_pk;
-  throw std::runtime_error("pqkem not enabled at build");
-#endif
 }
 
-inline secure_vector pqkem_decaps(std::string_view oqs_alg,
+inline secure_vector pqkem_decaps(std::string_view alg,
                                   std::span<const unsigned char> ct,
                                   const secure_vector &sk) {
-#ifdef USE_LIBOQS
-  OQS_KEM_ptr kem(OQS_KEM_new(std::string(oqs_alg).c_str()));
-  if (kem == nullptr) {
-    throw std::runtime_error("pqkem new failed");
+  auto pkey = pqc_detail::pkey_from_private_bytes(alg, sk);
+  EVP_PKEY_CTX_ptr ctx(EVP_PKEY_CTX_new_from_pkey(nullptr, pkey.get(), nullptr));
+  if (!ctx) {
+    throw std::runtime_error("pqkem decaps: EVP_PKEY_CTX_new_from_pkey failed");
   }
-  secure_vector ss(kem->length_shared_secret);
-  if (OQS_KEM_decaps(kem.get(), ss.data(), ct.data(), sk.data()) !=
-      OQS_SUCCESS) {
+  if (EVP_PKEY_decapsulate_init(ctx.get(), nullptr) != 1) {
+    throw std::runtime_error("pqkem decaps init failed");
+  }
+  size_t secret_len = 0;
+  if (EVP_PKEY_decapsulate(ctx.get(), nullptr, &secret_len, ct.data(),
+                           ct.size()) != 1) {
+    throw std::runtime_error("pqkem decaps size query failed");
+  }
+  secure_vector ss(secret_len);
+  if (EVP_PKEY_decapsulate(ctx.get(), ss.data(), &secret_len, ct.data(),
+                           ct.size()) != 1) {
     throw std::runtime_error("pqkem decaps failed");
   }
+  ss.resize(secret_len);
   return ss;
-#else
-  (void)oqs_alg;
-  (void)ct;
-  (void)sk;
-  throw std::runtime_error("pqkem not enabled at build");
-#endif
 }
 
 struct PublicKey {
@@ -265,78 +383,78 @@ struct Signature {
 };
 
 inline std::pair<std::vector<unsigned char>, std::vector<unsigned char>>
-pqsig_keypair(std::string_view oqs_alg) {
-#ifdef USE_LIBOQS
-  OQS_SIG_ptr sig(OQS_SIG_new(std::string(oqs_alg).c_str()));
-  if (sig == nullptr) {
-    throw std::runtime_error("pqsig new failed");
+pqsig_keypair(std::string_view alg) {
+  EVP_PKEY *raw = EVP_PKEY_Q_keygen(nullptr, nullptr, std::string(alg).c_str());
+  if (raw == nullptr) {
+    throw std::runtime_error("pqsig keypair failed for " + std::string(alg));
   }
-  std::vector<unsigned char> pk(sig->length_public_key);
-  std::vector<unsigned char> sk(sig->length_secret_key);
-  if (OQS_SIG_keypair(sig.get(), pk.data(), sk.data()) != OQS_SUCCESS) {
-    throw std::runtime_error("pqsig keypair failed");
-  }
-  return {std::move(pk), std::move(sk)};
-#else
-  (void)oqs_alg;
-  throw std::runtime_error("pqsig not enabled at build");
-#endif
+  EVP_PKEY_ptr pkey(raw);
+  auto pub = pqc_detail::get_pub_octets(pkey.get());
+  auto priv = pqc_detail::get_priv_octets(pkey.get());
+  return {std::move(pub), std::vector<unsigned char>(priv.begin(), priv.end())};
 }
 
-inline std::vector<unsigned char> pqsig_sign(std::string_view oqs_alg,
+inline std::vector<unsigned char> pqsig_sign(std::string_view alg,
                                              SecretKey sk, Message msg) {
-#ifdef USE_LIBOQS
-  OQS_SIG_ptr sig(OQS_SIG_new(std::string(oqs_alg).c_str()));
-  if (sig == nullptr) {
-    throw std::runtime_error("pqsig new failed");
+  auto pkey = pqc_detail::pkey_from_private_bytes(alg, sk.data);
+  EVP_PKEY_CTX_ptr ctx(EVP_PKEY_CTX_new_from_pkey(nullptr, pkey.get(), nullptr));
+  if (!ctx) {
+    throw std::runtime_error("pqsig sign: EVP_PKEY_CTX_new_from_pkey failed");
   }
-  std::size_t siglen = sig->length_signature;
-  std::vector<unsigned char> out(siglen);
-  if (OQS_SIG_sign(sig.get(), out.data(), &siglen, msg.data.data(),
-                   msg.data.size(), sk.data.data()) != OQS_SUCCESS) {
+  EVP_SIGNATURE_ptr sig_alg(
+      EVP_SIGNATURE_fetch(nullptr, std::string(alg).c_str(), nullptr));
+  if (!sig_alg) {
+    throw std::runtime_error("pqsig sign: EVP_SIGNATURE_fetch failed for " +
+                             std::string(alg));
+  }
+  if (EVP_PKEY_sign_message_init(ctx.get(), sig_alg.get(), nullptr) != 1) {
+    throw std::runtime_error("pqsig sign_message_init failed");
+  }
+  size_t sig_len = 0;
+  if (EVP_PKEY_sign(ctx.get(), nullptr, &sig_len, msg.data.data(),
+                    msg.data.size()) != 1) {
+    throw std::runtime_error("pqsig sign size query failed");
+  }
+  std::vector<unsigned char> out(sig_len);
+  if (EVP_PKEY_sign(ctx.get(), out.data(), &sig_len, msg.data.data(),
+                    msg.data.size()) != 1) {
     throw std::runtime_error("pqsig sign failed");
   }
-  out.resize(siglen);
+  out.resize(sig_len);
   return out;
-#else
-  (void)oqs_alg;
-  (void)sk;
-  (void)msg;
-  throw std::runtime_error("pqsig not enabled at build");
-#endif
 }
 
-inline bool pqsig_verify(std::string_view oqs_alg, PublicKey pk, Message msg,
+inline bool pqsig_verify(std::string_view alg, PublicKey pk, Message msg,
                          Signature signature) {
-#ifdef USE_LIBOQS
-  OQS_SIG_ptr sig(OQS_SIG_new(std::string(oqs_alg).c_str()));
-  if (sig == nullptr) {
-    throw std::runtime_error("pqsig new failed");
+  auto pkey = pqc_detail::pkey_from_public_bytes(alg, pk.data);
+  EVP_PKEY_CTX_ptr ctx(EVP_PKEY_CTX_new_from_pkey(nullptr, pkey.get(), nullptr));
+  if (!ctx) {
+    throw std::runtime_error("pqsig verify: EVP_PKEY_CTX_new_from_pkey failed");
   }
-  const bool ok = (OQS_SIG_verify(sig.get(), msg.data.data(), msg.data.size(),
-                                  signature.data.data(), signature.data.size(),
-                                  pk.data.data()) == OQS_SUCCESS);
-  return ok;
-#else
-  (void)oqs_alg;
-  (void)pk;
-  (void)msg;
-  (void)signature;
-  throw std::runtime_error("pqsig not enabled at build");
-#endif
+  EVP_SIGNATURE_ptr sig_alg(
+      EVP_SIGNATURE_fetch(nullptr, std::string(alg).c_str(), nullptr));
+  if (!sig_alg) {
+    throw std::runtime_error("pqsig verify: EVP_SIGNATURE_fetch failed for " +
+                             std::string(alg));
+  }
+  if (EVP_PKEY_verify_message_init(ctx.get(), sig_alg.get(), nullptr) != 1) {
+    throw std::runtime_error("pqsig verify_message_init failed");
+  }
+  return EVP_PKEY_verify(ctx.get(), signature.data.data(), signature.data.size(),
+                        msg.data.data(), msg.data.size()) == 1;
 }
 
 inline std::vector<unsigned char>
-pqsig_sign(std::string_view oqs_alg, std::span<const unsigned char> sk,
+pqsig_sign(std::string_view alg, std::span<const unsigned char> sk,
            std::span<const unsigned char> msg) {
-  return pqsig_sign(oqs_alg, SecretKey{sk}, Message{msg});
+  return pqsig_sign(alg, SecretKey{sk}, Message{msg});
 }
 
-inline bool pqsig_verify(std::string_view oqs_alg,
+inline bool pqsig_verify(std::string_view alg,
                          std::span<const unsigned char> pk,
                          std::span<const unsigned char> msg,
                          std::span<const unsigned char> signature) {
-  return pqsig_verify(oqs_alg, PublicKey{pk}, Message{msg},
+  return pqsig_verify(alg, PublicKey{pk}, Message{msg},
                       Signature{signature});
 }
 
@@ -560,8 +678,10 @@ inline std::vector<unsigned char> aead_decrypt(
   return out;
 }
 
-inline SessionKey derive_shared_key_from_secret(const secure_vector &shared,
-                                                std::string_view context) {
+inline DirectionalSessionKeys
+derive_directional_keys_from_secret(const secure_vector &shared,
+                                    std::string_view context,
+                                    bool i_am_initiator) {
   if (shared.empty()) {
     throw std::runtime_error("empty shared secret");
   }
@@ -581,24 +701,36 @@ inline SessionKey derive_shared_key_from_secret(const secure_vector &shared,
   }
 
   constexpr std::size_t okm_len = 32;
-  std::vector<unsigned char> info(context.begin(), context.end());
-  info.push_back(0x01);
 
-  SecureArray<okm_len> okm;
-  unsigned int out_len = 0;
+  const auto expand = [&](std::string_view label) {
+    std::vector<unsigned char> info;
+    info.reserve(label.size() + 1 + context.size() + 1);
+    info.insert(info.end(), label.begin(), label.end());
+    info.push_back('|');
+    info.insert(info.end(), context.begin(), context.end());
+    info.push_back(0x01);
 
-  if (HMAC(md, prk.data(), static_cast<int>(prk_len), info.data(),
-           static_cast<int>(info.size()), okm.data(), &out_len) == nullptr) {
-    throw std::runtime_error("HKDF-Expand (HMAC) failed");
+    SecureArray<okm_len> okm;
+    unsigned int out_len = 0;
+    if (HMAC(md, prk.data(), static_cast<int>(prk_len), info.data(),
+             static_cast<int>(info.size()), okm.data(), &out_len) ==
+        nullptr) {
+      throw std::runtime_error("HKDF-Expand (HMAC) failed");
+    }
+    if (out_len < okm_len) {
+      throw std::runtime_error("HKDF derived insufficient output");
+    }
+    return secure_vector(
+        okm.begin(), std::next(okm.begin(), static_cast<std::ptrdiff_t>(okm_len)));
+  };
+
+  secure_vector k_i2r = expand("SPRK-v2-initiator-to-responder");
+  secure_vector k_r2i = expand("SPRK-v2-responder-to-initiator");
+
+  if (i_am_initiator) {
+    return DirectionalSessionKeys{std::move(k_i2r), std::move(k_r2i)};
   }
-  if (out_len < okm_len) {
-    throw std::runtime_error("HKDF derived insufficient output");
-  }
-
-  secure_vector key(
-      okm.begin(),
-      std::next(okm.begin(), static_cast<std::ptrdiff_t>(okm_len)));
-  return SessionKey{std::move(key)};
+  return DirectionalSessionKeys{std::move(k_r2i), std::move(k_i2r)};
 }
 
 inline secure_vector derive_nonce_from_session(const secure_vector &session_key,
@@ -690,34 +822,6 @@ inline std::string
 fingerprint_to_hex(const std::array<unsigned char, SHA256_LEN> &f) {
   return to_hex(f.data(), f.size());
 }
-
-inline std::pair<std::vector<unsigned char>, secure_vector>
-pqkem_keypair_from_seed(std::string_view alg, const secure_vector &seed) {
-#ifdef USE_LIBOQS
-  OQS_KEM_ptr kem(OQS_KEM_new(std::string(alg).c_str()));
-  if (kem == nullptr) {
-    throw std::runtime_error("pqkem new failed");
-  }
-  if (seed.size() < kem->length_secret_key) {
-    throw std::runtime_error("seed too small");
-  }
-  secure_vector sk(kem->length_secret_key);
-  std::copy_n(seed.begin(), kem->length_secret_key, sk.begin());
-  std::vector<unsigned char> pk(kem->length_public_key);
-  if (OQS_KEM_encaps(kem.get(), pk.data(), sk.data(), pk.data()) !=
-      OQS_SUCCESS) {
-    throw std::runtime_error("pqkem seed keypair failed");
-  }
-  return {std::move(pk), std::move(sk)};
-#else
-  (void)alg;
-  (void)seed;
-  throw std::runtime_error("pqkem not enabled at build");
-#endif
-}
-
-// After existing fingerprint_sha256 and fingerprint_to_hex, convenience
-// wrappers.
 
 inline std::string compute_fingerprint_hex(std::span<const unsigned char> pk) {
   return fingerprint_to_hex(fingerprint_sha256(pk));

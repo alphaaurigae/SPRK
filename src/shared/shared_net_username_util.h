@@ -7,6 +7,8 @@
 #include <openssl/rand.h>
 #include <ranges>
 #include <string_view>
+#include <vector>
+#include <stdexcept>
 
 constexpr size_t MAX_USERNAME_LENGTH = 64;
 constexpr size_t MIN_USERNAME_LENGTH = 1;

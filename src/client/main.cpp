@@ -61,10 +61,19 @@ static void close_ssl_stream_if_any() {
 
 static void reset_peers_state() {
   const std::lock_guard<std::mutex> lk(peer_globals::peers_mtx());
+  // A full disconnect/reconnect is exactly as disruptive to every OTHER
+  // peer's relationship with this client as an ephemeral-key rotation is
+  // (see rotate_ephemeral_if_needed's identical reasoning in
+  // client_crypto_util.h): the local ephemeral keypair may be persisted
+  // across the reconnect, but every peer relationship still needs to redo
+  // its KEM exchange, since none of them were told this client disconnected.
   for (auto &kv : peer_globals::peers()) {
     kv.second.ready = false;
     kv.second.sent_hello = false;
-    kv.second.sk.key.clear();
+    kv.second.send_seq = 0;
+    kv.second.recv_seq = 0;
+    kv.second.keys.send_key.clear();
+    kv.second.keys.recv_key.clear();
   }
 }
 
@@ -114,25 +123,42 @@ static bool attempt_connection(asio::io_context &io,
                                bool &have_persisted_eph)
 
 {
-  std::atomic<bool> connection_complete{false};
-  std::mutex mtx;
-  std::condition_variable cv;
+  // Sync primitives are shared_ptr-owned (not stack references captured by
+  // the async completion lambda): a real TLS 1.3 + PQ hybrid handshake
+  // routinely takes longer than a short fixed guess, and if this function
+  // returned while a callback still held references to now-destroyed stack
+  // locals, that is a stack-use-after-return bug (found via ASan during live
+  // testing in this project's audit). Shared ownership makes it safe
+  // regardless of how long the handshake actually takes.
+  auto connection_complete = std::make_shared<std::atomic<bool>>(false);
+  auto connection_result = std::make_shared<std::atomic<bool>>(false);
+  auto mtx = std::make_shared<std::mutex>();
+  auto cv = std::make_shared<std::condition_variable>();
 
-  attempt_connection_async(io, ServerStr{config.server}, PortInt{config.port},
-                           PersistedEphPk{eph.pk}, PersistedEphSk{eph.sk},
-                           HavePersistedEph{have_persisted_eph},
-                           [&connection_complete, &cv](bool success) {
-                             if (success)
-                               runtime_globals::is_connected() = true;
-                             connection_complete = true;
-                             cv.notify_one();
-                           });
+  attempt_connection_async(
+      io, ServerStr{config.server}, PortInt{config.port},
+      PersistedEphPk{eph.pk}, PersistedEphSk{eph.sk},
+      HavePersistedEph{have_persisted_eph},
+      [connection_complete, connection_result, mtx, cv](bool success) {
+        connection_result->store(success, std::memory_order_release);
+        {
+          const std::lock_guard<std::mutex> lk(*mtx);
+          connection_complete->store(true, std::memory_order_release);
+        }
+        cv->notify_one();
+      });
 
-  std::unique_lock<std::mutex> ul(mtx);
-  cv.wait_for(ul, std::chrono::milliseconds(100),
-              [&connection_complete] { return connection_complete.load(); });
+  std::unique_lock<std::mutex> ul(*mtx);
+  static constexpr auto kConnectionAttemptDeadline = std::chrono::seconds(30);
+  cv->wait_for(ul, kConnectionAttemptDeadline, [&connection_complete] {
+    return connection_complete->load(std::memory_order_acquire);
+  });
 
-  return runtime_globals::is_connected();
+  const bool succeeded = connection_complete->load(std::memory_order_acquire) &&
+                        connection_result->load(std::memory_order_acquire);
+  if (succeeded)
+    runtime_globals::is_connected() = true;
+  return succeeded;
 }
 
 static void handle_post_connection() {

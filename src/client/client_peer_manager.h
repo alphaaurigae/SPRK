@@ -19,7 +19,7 @@ struct PeerInfo {
   secure_vector eph_pk{};
   secure_vector identity_pk{};
   std::string peer_fp_hex{};
-  SessionKey sk{};
+  DirectionalSessionKeys keys{};
   uint32_t recv_seq = 0;
   uint32_t send_seq = 0;
   uint64_t last_recv_time = 0;
@@ -138,13 +138,27 @@ void update_peer_info(PeerInfo &pi, PeerNameStr peer_name,
   }
 }
 
+// An encaps is only ever meaningful if it explicitly names the intended
+// recipient's fingerprint -- the wire protocol broadcasts every MSG_HELLO to
+// the whole session, so without this check a bystander (or a stale-but-still
+// "ready" peer who was never told the sender disconnected/reconnected) has no
+// principled way to tell whether a given ciphertext is theirs to decapsulate.
+[[nodiscard]] inline bool encaps_targets_me(const Parsed &p) noexcept {
+  if (p.encaps.empty() || p.target_fp.empty())
+    return false;
+  const auto my_fp_bytes = from_hex(peer_globals::my_fp_hex());
+  return p.target_fp.size() == my_fp_bytes.size() &&
+         std::equal(p.target_fp.begin(), p.target_fp.end(),
+                    my_fp_bytes.begin());
+}
+
 bool detect_key_changes(const PeerInfo &pi, const Parsed &p, bool &pk_changed,
                         bool &has_new_encaps) {
   const bool had_eph_pk = !pi.eph_pk.empty();
   pk_changed = had_eph_pk && (pi.eph_pk.size() != p.eph_pk.size() ||
                               !std::equal(pi.eph_pk.begin(), pi.eph_pk.end(),
                                           p.eph_pk.begin()));
-  has_new_encaps = !p.encaps.empty() && had_eph_pk && !pi.ready;
+  has_new_encaps = had_eph_pk && encaps_targets_me(p);
   return !had_eph_pk || pk_changed || has_new_encaps;
 }
 
@@ -153,7 +167,8 @@ void handle_rekey(PeerInfo &pi, PeerNameStr peer_name, MsU ms) {
   pi.send_seq = 0;
   pi.ready = false;
   pi.sent_hello = false;
-  pi.sk.key.clear();
+  pi.keys.send_key.clear();
+  pi.keys.recv_key.clear();
   pi.identity_verified = false;
   std::cout << "[" << ms.v << "] peer " << std::string(peer_name.v)
             << " rekeyed\n";

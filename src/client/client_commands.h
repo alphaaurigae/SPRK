@@ -31,9 +31,6 @@ public:
   [[nodiscard]] std::string &&str() && { return std::move(value); }
 };
 
-#ifdef __clang__
-#endif
-
 inline std::vector<std::string> parse_recipient_list(const std::string &input) {
   std::vector<std::string> recipients;
   size_t start = 0;

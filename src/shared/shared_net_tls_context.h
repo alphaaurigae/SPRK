@@ -9,7 +9,7 @@
 #include <openssl/ssl.h>
 #include <string_view>
 
-constexpr std::string_view TLS_HYBRID_GROUPS = "X25519MLKEM768:X25519";
+constexpr std::string_view TLS_HYBRID_GROUPS = "X25519MLKEM768";
 constexpr std::string_view TLS_CIPHER_SUITES = "TLS_AES_256_GCM_SHA384:"
                                                "TLS_CHACHA20_POLY1305_SHA256:"
                                                "TLS_AES_128_GCM_SHA256";
@@ -49,21 +49,11 @@ struct TLSContextConfig {
     return false;
   }
 
-  OSSL_PROVIDER *oqsprov = OSSL_PROVIDER_load(nullptr, "oqsprovider");
-  if (!oqsprov) {
-    std::cerr << "ERROR: Failed to load oqsprovider (KEM_ALG_NAME / "
-                 "SIG_ALG_NAME missing)!\n";
-    ERR_print_errors_fp(stderr);
-    OSSL_PROVIDER_unload(default_prov);
-    return false;
-  }
-
   initialized = true;
   return true;
 }
 
 [[nodiscard]] inline bool apply_pq_security_policy(SSL_CTX *ctx) noexcept {
-  SSL_CTX_set_security_level(ctx, 0);
   SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
 
   if (SSL_CTX_set_ciphersuites(ctx, TLS_CIPHER_SUITES.data()) != 1) {

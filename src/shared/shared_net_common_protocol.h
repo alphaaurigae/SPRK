@@ -22,7 +22,9 @@ constexpr uint8_t ALGO_MLDSA87 = 13;
 
 constexpr size_t MAX_PQC_PUBKEY_LEN = 8192;
 constexpr size_t MAX_PQC_SIG_LEN = 8192;
-inline constexpr char KEM_ALG_NAME[] = "Kyber512";
+inline constexpr char KEM_ALG_NAME[] = "ML-KEM-768";
+constexpr size_t ML_KEM_768_PUBLIC_KEY_LEN = 1184;
+constexpr size_t ML_KEM_768_CIPHERTEXT_LEN = 1088;
 inline constexpr char SIG_ALG_NAME[] = "ML-DSA-87";
 
 constexpr uint8_t ALGO_KEM_ALG_NAME = ALGO_KYBER512;
@@ -60,6 +62,7 @@ struct Parsed {
   std::vector<unsigned char> identity_pk;
   std::vector<unsigned char> signature;
   std::vector<unsigned char> encaps;
+  std::vector<unsigned char> target_fp;
   std::string session_id;
   std::string from;
   std::string to;
@@ -78,6 +81,7 @@ build_hello(const std::string &username, uint8_t eph_alg,
             const std::vector<unsigned char> &identity_pk,
             const std::vector<unsigned char> &signature,
             const std::vector<unsigned char> &encaps,
+            const std::vector<unsigned char> &target_fp,
             const std::string &session_id);
 
 [[nodiscard]] inline std::vector<unsigned char>
@@ -108,7 +112,6 @@ using proto::build_pubkey_response;
 
 namespace proto_detail {
 
-// low-level BE conversions
 [[nodiscard]] constexpr inline uint16_t
 load_be16(const unsigned char *p) noexcept {
   return static_cast<uint16_t>((p[0] << 8) | p[1]);
@@ -133,7 +136,6 @@ constexpr inline void store_be32(unsigned char *p, uint32_t v) noexcept {
   p[3] = static_cast<unsigned char>(v);
 }
 
-// high-level reads
 [[nodiscard]] inline uint16_t
 read_u16_be(std::span<const unsigned char> payload, size_t idx) noexcept {
   return load_be16(payload.data() + idx);
@@ -144,7 +146,6 @@ read_u32_be(std::span<const unsigned char> payload, size_t idx) noexcept {
   return load_be32(payload.data() + idx);
 }
 
-// other proto_detail helpers
 [[nodiscard]] inline ptrdiff_t to_offset(size_t value) noexcept {
   return static_cast<ptrdiff_t>(value);
 }
@@ -161,7 +162,6 @@ extract_bytes(std::span<const unsigned char> payload, size_t start,
           payload.begin() + to_offset(start + len)};
 }
 
-// string / bytes readers
 [[nodiscard]] inline std::string
 read_string_u8(std::span<const unsigned char> payload, size_t &idx,
                size_t max_len, const char *field_name) {
@@ -207,6 +207,8 @@ inline proto::Parsed parse_hello(std::span<const unsigned char> payload,
   out.signature =
       read_bytes_u16(payload, idx, MAX_PQC_SIG_LEN, "signature", true);
   out.encaps = read_bytes_u16(payload, idx, 65535, "encaps", true);
+  out.target_fp =
+      read_bytes_u16(payload, idx, FINGERPRINT_LEN, "target_fp", true);
   ensure_range(idx, SESSION_ID_LEN, payload.size(), "session_id");
   out.session_id =
       std::string{make_string_view(payload.data() + idx, SESSION_ID_LEN)};
@@ -288,6 +290,7 @@ proto::build_hello(const std::string &username, uint8_t eph_alg,
                    const std::vector<unsigned char> &identity_pk,
                    const std::vector<unsigned char> &signature,
                    const std::vector<unsigned char> &encaps,
+                   const std::vector<unsigned char> &target_fp,
                    const std::string &session_id) {
   if (username.empty() || username.size() > MAX_USERNAME)
     throw std::runtime_error("bad username");
@@ -301,14 +304,18 @@ proto::build_hello(const std::string &username, uint8_t eph_alg,
     throw std::runtime_error("bad signature len");
   if (encaps.size() > 65535)
     throw std::runtime_error("bad encaps len");
+  if (target_fp.size() > FINGERPRINT_LEN)
+    throw std::runtime_error("bad target_fp len");
 
   const auto eph_len = static_cast<uint16_t>(eph_pk.size());
   const auto id_len = static_cast<uint16_t>(identity_pk.size());
   const auto sig_len = static_cast<uint16_t>(signature.size());
   const auto enc_len = static_cast<uint16_t>(encaps.size());
+  const auto tgt_len = static_cast<uint16_t>(target_fp.size());
 
   const size_t total_size = 2 + 1 + username.size() + 1 + 2 + eph_len + 1 + 2 +
-                            id_len + 2 + sig_len + 2 + enc_len + SESSION_ID_LEN;
+                            id_len + 2 + sig_len + 2 + enc_len + 2 + tgt_len +
+                            SESSION_ID_LEN;
 
   Poco::Buffer<unsigned char> buf(total_size);
   auto it = buf.begin();
@@ -335,6 +342,10 @@ proto::build_hello(const std::string &username, uint8_t eph_alg,
   *it++ = static_cast<unsigned char>((enc_len >> 8) & 0xFFU);
   *it++ = static_cast<unsigned char>(enc_len & 0xFFU);
   it = std::copy(encaps.begin(), encaps.end(), it);
+
+  *it++ = static_cast<unsigned char>((tgt_len >> 8) & 0xFFU);
+  *it++ = static_cast<unsigned char>(tgt_len & 0xFFU);
+  it = std::copy(target_fp.begin(), target_fp.end(), it);
 
   it = std::copy(session_id.begin(), session_id.end(), it);
 

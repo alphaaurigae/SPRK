@@ -239,6 +239,7 @@ int main(int argc, char **argv) {
       want_raw = true;
     } else if (arg == "--out-dir" && i + 1 < argv_span.size()) {
       out_dir = argv_span[i + 1];
+      out_dir.makeDirectory();
       if (!out_dir.isAbsolute())
         out_dir.makeAbsolute();
       ++i;

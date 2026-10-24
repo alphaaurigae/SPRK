@@ -33,17 +33,15 @@ inline MessageContext prepare_message_context(const std::string &recipient_fp,
   if (!pi.ready)
     return ctx;
   ctx.seq = pi.send_seq;
-  ctx.session_key = pi.sk.key;
+  ctx.session_key = pi.keys.send_key;
   ctx.target_username = pi.username;
   const std::string hexfp = pi.peer_fp_hex;
   ctx.shortfp = hexfp.size() > 10 ? hexfp.substr(0, 10) : hexfp;
 
-  // AAD must use same sorted order as encryption defined in
-  // shared_common_crypto.h struct AADBuilder
   const std::string aad_str =
       AADBuilder{
-          my_fp_hex,     // me (sender) - local_fp
-          pi.peer_fp_hex // peer (receiver) - remote_fp
+          my_fp_hex,
+          pi.peer_fp_hex
       }
           .build_for_seq(ctx.seq);
   ctx.aad.assign(aad_str.begin(), aad_str.end());

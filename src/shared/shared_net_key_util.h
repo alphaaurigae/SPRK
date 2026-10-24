@@ -15,6 +15,7 @@
 
 #include <functional>
 #include <memory>
+#include <openssl/core_names.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -25,26 +26,6 @@
 namespace asio {
 class io_context;
 }
-
-struct PQKeypair {
-  secure_vector sk;
-  std::vector<unsigned char> pk;
-};
-
-struct SessionId {
-  std::string value;
-
-  [[nodiscard]] constexpr bool
-  operator==(const SessionId &other) const noexcept {
-    return value == other.value;
-  }
-  [[nodiscard]] constexpr auto
-  operator<=>(const SessionId &other) const noexcept = default;
-};
-
-struct PeerName {
-  std::string value;
-};
 
 enum class KeyLoadError : uint8_t {
   FileNotFound,
@@ -61,33 +42,6 @@ key_load_error_str(KeyLoadError e) noexcept {
       "file not found", "read failed",    "parse failed",
       "invalid key",    "no private key", "no public key"};
   return msgs[static_cast<size_t>(e)];
-}
-
-inline PQKeypair derive_ephemeral_for_peer(const secure_vector &identity_sk,
-                                           const SessionId &session_id,
-                                           const PeerName &peer) {
-#ifdef USE_LIBOQS
-  std::vector<unsigned char> salt(session_id.value.begin(),
-                                  session_id.value.end());
-  salt.insert(salt.end(), peer.value.begin(), peer.value.end());
-
-  OQS_KEM *kem = OQS_KEM_new(KEM_ALG_NAME);
-  if (!kem)
-    throw std::runtime_error("pqkem new failed");
-
-  const secure_vector derived_key =
-      hkdf(identity_sk, salt, kem->length_secret_key);
-  OQS_KEM_free(kem);
-
-  auto pqkp = pqkem_keypair_from_seed(KEM_ALG_NAME, derived_key);
-
-  PQKeypair ret;
-  ret.pk.assign(pqkp.first.begin(), pqkp.first.end());
-  ret.sk = secure_vector(pqkp.second.begin(), pqkp.second.end());
-  return ret;
-#else
-  throw std::runtime_error("liboqs not enabled at build");
-#endif
 }
 
 inline void load_pem_private_key_async(
@@ -153,7 +107,8 @@ inline void load_pem_private_key_async(
       size_t sk_len = 0;
       size_t pk_len = 0;
 
-      if (EVP_PKEY_get_raw_private_key(pkey, nullptr, &sk_len) <= 0) {
+      if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, nullptr,
+                                          0, &sk_len) <= 0) {
         EVP_PKEY_free(pkey);
         asio::post(io, [cb = std::move(cb)]() mutable {
           cb(std::variant<std::pair<secure_vector, secure_vector>,
@@ -162,7 +117,8 @@ inline void load_pem_private_key_async(
         return;
       }
 
-      if (EVP_PKEY_get_raw_public_key(pkey, nullptr, &pk_len) <= 0) {
+      if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, nullptr,
+                                          0, &pk_len) <= 0) {
         EVP_PKEY_free(pkey);
         asio::post(io, [cb = std::move(cb)]() mutable {
           cb(std::variant<std::pair<secure_vector, secure_vector>,
@@ -174,7 +130,9 @@ inline void load_pem_private_key_async(
       secure_vector raw_sk(sk_len);
       secure_vector raw_pk(pk_len);
 
-      if (EVP_PKEY_get_raw_private_key(pkey, raw_sk.data(), &sk_len) <= 0) {
+      if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY,
+                                          raw_sk.data(), raw_sk.size(),
+                                          &sk_len) <= 0) {
         EVP_PKEY_free(pkey);
         asio::post(io, [cb = std::move(cb)]() mutable {
           cb(std::variant<std::pair<secure_vector, secure_vector>,
@@ -183,7 +141,9 @@ inline void load_pem_private_key_async(
         return;
       }
 
-      if (EVP_PKEY_get_raw_public_key(pkey, raw_pk.data(), &pk_len) <= 0) {
+      if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY,
+                                          raw_pk.data(), raw_pk.size(),
+                                          &pk_len) <= 0) {
         EVP_PKEY_free(pkey);
         asio::post(io, [cb = std::move(cb)]() mutable {
           cb(std::variant<std::pair<secure_vector, secure_vector>,
@@ -266,13 +226,15 @@ load_pem_private_key_sync(const std::string &path) noexcept {
     size_t sk_len = 0;
     size_t pk_len = 0;
 
-    if (EVP_PKEY_get_raw_private_key(pkey, nullptr, &sk_len) <= 0) {
+    if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, nullptr,
+                                        0, &sk_len) <= 0) {
       EVP_PKEY_free(pkey);
       return std::variant<std::pair<secure_vector, secure_vector>,
                           KeyLoadError>{KeyLoadError::NoPrivateKey};
     }
 
-    if (EVP_PKEY_get_raw_public_key(pkey, nullptr, &pk_len) <= 0) {
+    if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, nullptr,
+                                        0, &pk_len) <= 0) {
       EVP_PKEY_free(pkey);
       return std::variant<std::pair<secure_vector, secure_vector>,
                           KeyLoadError>{KeyLoadError::NoPublicKey};
@@ -281,13 +243,17 @@ load_pem_private_key_sync(const std::string &path) noexcept {
     secure_vector raw_sk(sk_len);
     secure_vector raw_pk(pk_len);
 
-    if (EVP_PKEY_get_raw_private_key(pkey, raw_sk.data(), &sk_len) <= 0) {
+    if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY,
+                                        raw_sk.data(), raw_sk.size(),
+                                        &sk_len) <= 0) {
       EVP_PKEY_free(pkey);
       return std::variant<std::pair<secure_vector, secure_vector>,
                           KeyLoadError>{KeyLoadError::NoPrivateKey};
     }
 
-    if (EVP_PKEY_get_raw_public_key(pkey, raw_pk.data(), &pk_len) <= 0) {
+    if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY,
+                                        raw_pk.data(), raw_pk.size(),
+                                        &pk_len) <= 0) {
       EVP_PKEY_free(pkey);
       return std::variant<std::pair<secure_vector, secure_vector>,
                           KeyLoadError>{KeyLoadError::NoPublicKey};
@@ -366,7 +332,6 @@ inline bool load_identity_keys(const char *key_path) noexcept {
   }
 }
 
-// Eliminate Non-Cryptographic Identity Fallback
 [[nodiscard]] inline std::optional<std::string>
 compute_peer_key(const Parsed &p, std::string &peer_fp_hex) noexcept {
 

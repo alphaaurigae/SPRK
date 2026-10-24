@@ -148,19 +148,21 @@ attempt_connection_async(asio::io_context &io, ServerStr server, PortInt port,
 
               std::vector<unsigned char> sig_data;
               sig_data.reserve(peer_globals::my_eph_pk().size() +
-                               peer_globals::session_id().size());
+                               peer_globals::session_id().size() +
+                               peer_globals::my_username().size());
               sig_data.insert(sig_data.end(), peer_globals::my_eph_pk().begin(),
                               peer_globals::my_eph_pk().end());
               sig_data.insert(sig_data.end(),
                               peer_globals::session_id().begin(),
                               peer_globals::session_id().end());
+              sig_data.insert(sig_data.end(),
+                              peer_globals::my_username().begin(),
+                              peer_globals::my_username().end());
 
-              const auto signature =
-                  pqsig_sign(SIG_ALG_NAME,
-                             std::vector<unsigned char>(
-                                 peer_globals::my_identity_sk().begin(),
-                                 peer_globals::my_identity_sk().end()),
-                             sig_data);
+              const auto signature = pqsig_sign(
+                  SIG_ALG_NAME,
+                  std::span<const unsigned char>(peer_globals::my_identity_sk()),
+                  sig_data);
 
               const auto hello_frame = build_hello(
                   peer_globals::my_username(), ALGO_KEM_ALG_NAME,
@@ -171,7 +173,7 @@ attempt_connection_async(asio::io_context &io, ServerStr server, PortInt port,
                       peer_globals::my_identity_pk().begin(),
                       peer_globals::my_identity_pk().end()),
                   signature, std::vector<unsigned char>{},
-                  peer_globals::session_id());
+                  std::vector<unsigned char>{}, peer_globals::session_id());
 
               auto frame_ptr =
                   std::make_shared<std::vector<unsigned char>>(hello_frame);

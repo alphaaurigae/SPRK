@@ -75,10 +75,13 @@ static std::string validate_hello_basics(const Parsed &p, HelloBasicsOut &out) {
     return "missing identity or signature";
   }
 
+  // protocol v2: signed payload is eph_pk||session_id||username, matching
+  // the fixed client's client_crypto_util.h/client_session.h signing.
   std::vector<unsigned char> sig_data;
-  sig_data.reserve(p.eph_pk.size() + p.session_id.size());
+  sig_data.reserve(p.eph_pk.size() + p.session_id.size() + p.username.size());
   sig_data.insert(sig_data.end(), p.eph_pk.begin(), p.eph_pk.end());
   sig_data.insert(sig_data.end(), p.session_id.begin(), p.session_id.end());
+  sig_data.insert(sig_data.end(), p.username.begin(), p.username.end());
 
   bool sig_ok{false};
   sig_ok = (p.id_alg == ALGO_MLDSA87) &&
@@ -117,7 +120,6 @@ static bool check_username_conflicts(SessionData &sd, const std::string &uname,
                                      std::shared_ptr<ClientState> client) {
   auto it_existing = sd.clients_by_nick.find(uname);
 
-  // Exact match with different fd → reject
   if (it_existing != sd.clients_by_nick.end() &&
       it_existing->second != client) {
     std::cout << "REJECTED: username already in use " << uname << "\n";
@@ -125,7 +127,6 @@ static bool check_username_conflicts(SessionData &sd, const std::string &uname,
     return false;
   }
 
-  // Similar username, but not the same client re-connecting
   if (has_similar_username(uname, sd.clients_by_nick, 85) &&
       (it_existing == sd.clients_by_nick.end() ||
        it_existing->second != client)) {

@@ -1,142 +1,69 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Post-quantum certificate generator – native OpenSSL 3.5.0
+OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
 
-# IMPORTANT: your build installed libs into lib64, not lib!
-export LD_PRELOAD="/usr/local/openssl-3.5/lib64/libssl.so.3 /usr/local/openssl-3.5/lib64/libcrypto.so.3${LD_PRELOAD:+:$LD_PRELOAD}"
-export PATH="/usr/local/openssl-3.5/bin:$PATH"
-
-# Debug output – helps diagnose
-echo "LD_PRELOAD set to: $LD_PRELOAD"
-echo "PATH set to: $PATH"
-
-# Verify correct OpenSSL version
-OPENSSL_VERSION=$(openssl version 2>/dev/null || echo "failed")
-if ! echo "$OPENSSL_VERSION" | grep -q "OpenSSL 3.5"; then
-    echo "ERROR: Wrong OpenSSL version loaded!"
-    echo "Expected: OpenSSL 3.5.x"
-    echo "Got:      $OPENSSL_VERSION"
-    echo "(run 'ldd /usr/local/openssl-3.5/bin/openssl' to see loaded libraries)"
+OPENSSL_VERSION=$("$OPENSSL_BIN" version 2>/dev/null || echo "failed")
+if ! echo "$OPENSSL_VERSION" | grep -qE "OpenSSL 3\.(5|[6-9]|[1-9][0-9])"; then
+    echo "ERROR: OpenSSL 3.5+ required (native ML-KEM/ML-DSA support)."
+    echo "Found: $OPENSSL_VERSION"
     exit 1
 fi
+echo "Using: $OPENSSL_VERSION"
 
-echo "Success: Using correct OpenSSL version: $OPENSSL_VERSION"
+if ! "$OPENSSL_BIN" list -signature-algorithms | grep -qi mldsa87; then
+    echo "ERROR: ML-DSA-87 not available in this OpenSSL build."; exit 1
+fi
+if ! "$OPENSSL_BIN" list -kem-algorithms | grep -qi "ml-kem-768"; then
+    echo "ERROR: ML-KEM-768 not available in this OpenSSL build."; exit 1
+fi
+echo "ML-DSA-87 / ML-KEM-768 confirmed available."
 
 CLIENTS=("ron" "bob" "beth")
 CERT_DIR="sample/sample_test_cert"
 
-# Backup old certs if they exist
-if ls "$CERT_DIR"/*.{crt,key,csr,srl} &>/dev/null; then
+if [[ -d "$CERT_DIR" ]] && compgen -G "$CERT_DIR/*.key" > /dev/null; then
     BACKUP_DIR="${CERT_DIR}.old.$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$BACKUP_DIR"
     cp -r "$CERT_DIR"/* "$BACKUP_DIR/" 2>/dev/null || true
-    echo "Old certificates backed up to $BACKUP_DIR"
+    echo "Old certificates backed up to $BACKUP_DIR -- treat as compromised, regenerate everything."
 fi
 
-# Clean old files
-rm -f "$CERT_DIR"/*.{crt,key,csr,srl}
-
+rm -f "$CERT_DIR"/*.crt "$CERT_DIR"/*.key "$CERT_DIR"/*.csr "$CERT_DIR"/*.srl
 mkdir -p "$CERT_DIR"
 
-ensure_entropy() {
-    local current=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
-    if (( current < 2000 )); then
-        echo "Low entropy detected — waiting a few seconds..."
-        sleep 6
-    fi
-}
-
-write_extensions() {
-    cat > "$CERT_DIR/openssl_ext.cnf" <<'EOF'
+cat > "$CERT_DIR/openssl_ext.cnf" <<'EXT'
 [v3_ca]
 basicConstraints = critical,CA:TRUE
 keyUsage = critical,keyCertSign,cRLSign,digitalSignature
-
 [v3_server]
 basicConstraints = CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth
-
 [v3_client]
 basicConstraints = CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = clientAuth
-EOF
-}
+EXT
 
-generate_ca() {
-    echo "→ Generating CA key & certificate (ML-DSA-87)..."
-    openssl genpkey -algorithm mldsa87 -out "$CERT_DIR/ca.key"
-    openssl req -new -key "$CERT_DIR/ca.key" -out "$CERT_DIR/ca.csr" -subj "/CN=SPRK CA"
-    openssl x509 -req -in "$CERT_DIR/ca.csr" -signkey "$CERT_DIR/ca.key" \
-        -out "$CERT_DIR/ca.crt" -days 3650 \
-        -extfile "$CERT_DIR/openssl_ext.cnf" -extensions v3_ca
-    rm -f "$CERT_DIR/ca.csr"
-}
+echo "-> Generating CA (ML-DSA-87)..."
+"$OPENSSL_BIN" genpkey -algorithm mldsa87 -out "$CERT_DIR/ca.key"
+"$OPENSSL_BIN" req -new -key "$CERT_DIR/ca.key" -out "$CERT_DIR/ca.csr" -subj "/CN=SPRK CA"
+"$OPENSSL_BIN" x509 -req -in "$CERT_DIR/ca.csr" -signkey "$CERT_DIR/ca.key" -out "$CERT_DIR/ca.crt" -days 3650 -extfile "$CERT_DIR/openssl_ext.cnf" -extensions v3_ca
 
-generate_server() {
-    echo "→ Generating server certificate (ML-DSA-87)..."
-    openssl genpkey -algorithm mldsa87 -out "$CERT_DIR/server.key"
-    openssl req -new -key "$CERT_DIR/server.key" -out "$CERT_DIR/server.csr" -subj "/CN=SPRK Server"
-    openssl x509 -req -in "$CERT_DIR/server.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" \
-        -CAcreateserial -out "$CERT_DIR/server.crt" -days 365 \
-        -extfile "$CERT_DIR/openssl_ext.cnf" -extensions v3_server
-    rm -f "$CERT_DIR/server.csr"
-}
+echo "-> Generating server cert..."
+"$OPENSSL_BIN" genpkey -algorithm mldsa87 -out "$CERT_DIR/server.key"
+"$OPENSSL_BIN" req -new -key "$CERT_DIR/server.key" -out "$CERT_DIR/server.csr" -subj "/CN=SPRK Server"
+"$OPENSSL_BIN" x509 -req -in "$CERT_DIR/server.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" -CAcreateserial -out "$CERT_DIR/server.crt" -days 365 -extfile "$CERT_DIR/openssl_ext.cnf" -extensions v3_server
 
-generate_clients() {
-    for client in "${CLIENTS[@]}"; do
-        echo "→ Generating $client client certificate..."
-        openssl genpkey -algorithm mldsa87 -out "$CERT_DIR/${client}_tls.key"
-        openssl req -new -key "$CERT_DIR/${client}_tls.key" -out "$CERT_DIR/${client}.csr" -subj "/CN=$client"
-        openssl x509 -req -in "$CERT_DIR/${client}.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" \
-            -CAcreateserial -out "$CERT_DIR/${client}.crt" -days 365 \
-            -extfile "$CERT_DIR/openssl_ext.cnf" -extensions v3_client
-        rm -f "$CERT_DIR/${client}.csr"
-    done
-}
+for client in "${CLIENTS[@]}"; do
+  echo "-> Generating $client TLS client cert..."
+  "$OPENSSL_BIN" genpkey -algorithm mldsa87 -out "$CERT_DIR/${client}_tls.key"
+  "$OPENSSL_BIN" req -new -key "$CERT_DIR/${client}_tls.key" -out "$CERT_DIR/${client}.csr" -subj "/CN=$client"
+  "$OPENSSL_BIN" x509 -req -in "$CERT_DIR/${client}.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" -CAcreateserial -out "$CERT_DIR/${client}.crt" -days 365 -extfile "$CERT_DIR/openssl_ext.cnf" -extensions v3_client
+done
 
-
-# Main execution
-
-ensure_entropy
-write_extensions
-
-generate_ca
-generate_server
-generate_clients
-
-rm -f "$CERT_DIR/openssl_ext.cnf"
-
-echo ""
-echo "All certificates generated successfully using native OpenSSL 3.5.0 + ML-DSA-87"
-echo "KEM recommendation: x25519_mlkem512 (hybrid post-quantum)"
-echo ""
-echo "Next step: rebuild & run the server"
-
+rm -f "$CERT_DIR"/*.csr "$CERT_DIR/openssl_ext.cnf"
+echo "All TLS certificates generated (ML-DSA-87, native OpenSSL 3.5+)."
+echo "Next: ./keygen_run.sh <username> --out-dir sample for each user, then ./build_cmake.sh"
 ls -la "$CERT_DIR"
-
-# openssl rsa -in sample/sample_test_cert/
-
-head -n 5 sample/sample_test_cert/ca.key
-tail -n 5 sample/sample_test_cert/ca.key
-
-# openssl rsa -in sample/sample_test_cert/server.key -check -noout
-
-lsb_release -a
-
-openssl version -a
-openssl --help
-openssl list -providers
-
-openssl list -kem-algorithms | grep mlkem51
-
-openssl list -signature-algorithms | grep mldsa87
-
-# After version check
-if ! openssl list -signature-algorithms | grep -q mldsa87; then
-    echo "ERROR: mldsa87 algorithm not available!"
-    exit 1
-fi
-echo "ML-DSA-87 support confirmed"

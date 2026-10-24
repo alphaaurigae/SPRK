@@ -43,6 +43,7 @@ std::string build_key_context_for_peer(const std::string &my_fp,
                                        const std::string &peer_fp_hex_ref,
                                        const std::string &session_id_val);
 void rotate_ephemeral_if_needed(const std::string &peer_fp);
+void send_current_hello_announcement();
 
 inline std::string get_fingerprint_for_user(const std::string &username)
 
@@ -228,7 +229,13 @@ inline bool process_peer_encaps(const Parsed &p, PeerNameIn peer_name,
                                 InitiatorFlag initiator, MsU ms) {
   const bool was_ready = pi.ready;
 
-  if (!p.encaps.empty() || (initiator.v && !pi.sent_hello)) {
+  // encaps_targets_me(p) replaces a raw "!p.encaps.empty()" check here:
+  // without explicit target-fp addressing, a bystander (or a peer whose
+  // ready=true is stale because they were never told we disconnected and
+  // reconnected) has no principled way to tell a ciphertext meant for them
+  // apart from one broadcast to the whole session but meant for someone
+  // else. See client_peer_manager.h::encaps_targets_me.
+  if (encaps_targets_me(p) || (initiator.v && !pi.sent_hello)) {
     bool handled = false;
     handled =
         initiator.v
@@ -297,8 +304,17 @@ inline void handle_hello(const Parsed &p) {
       if (pi.ready)
         dev_println("[" + std::to_string(ms) +
                     "] responder confirmed ready for " + peer_name);
-      else
+      else {
         log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
+        // Reflex: re-announce our own current hello so the true initiator
+        // toward this peer (whose own state was also reset -- see
+        // rotate_ephemeral_if_needed's all-peers reset, and
+        // reset_peers_state() on reconnect) has something fresh to react
+        // to. Without this, a responder who is not the one who rekeyed (or
+        // who just reconnected) has no way to prompt the initiator to redo
+        // the KEM exchange, and the channel silently stalls forever.
+        send_current_hello_announcement();
+      }
     } else
       log_awaiting_encaps(PeerNameView{peer_name}, MsU{ms});
   }
@@ -393,23 +409,14 @@ inline bool handle_sequence(PeerInfo &pi, SeqU64 seq, MsU ms,
     return false;
   }
 
-  bool jitter_detected = false;
-  jitter_detected = is_sequence_in_jitter_range(seq.v, pi.recv_seq,
-                                                DEFAULT_SEQ_JITTER_BUFFER);
-
-  if (jitter_detected) [[unlikely]] {
+  if (seq.v != pi.recv_seq) [[unlikely]] {
     dev_println("[" + std::to_string(ms.v) +
-                "] WARNING: jitter detected from " + std::string(peer_from.v) +
-                " got=" + std::to_string(seq.v) +
-                " expected=" + std::to_string(pi.recv_seq));
-    pi.recv_seq = seq.v;
-  } else if (seq.v != pi.recv_seq) [[unlikely]] {
-    dev_println("[" + std::to_string(ms.v) + "] REJECTED: seq mismatch from " +
+                "] INFO: accepted out-of-order/skipped seq from " +
                 std::string(peer_from.v) + " got=" + std::to_string(seq.v) +
                 " expected=" + std::to_string(pi.recv_seq));
-    return false;
   }
 
+  pi.recv_seq = seq.v;
   return true;
 }
 
@@ -438,7 +445,7 @@ inline void handle_chat(const Parsed &p) {
     const std::string sender_fp_hex = compute_sender_fp_hex(*pi);
     const auto aad = build_aad_seq(SenderFpHexIn{sender_fp_hex}, SeqU64{p.seq});
 
-    const auto pt = aead_decrypt(pi->sk.key, p.ciphertext, aad, p.nonce);
+    const auto pt = aead_decrypt(pi->keys.recv_key, p.ciphertext, aad, p.nonce);
     if (pt.empty()) [[unlikely]] {
       dev_println("[" + std::to_string(ms) +
                   "] handle_chat: aead_decrypt returned empty for " +
@@ -467,7 +474,6 @@ inline void handle_chat(const Parsed &p) {
       std::cout.flush();
     }
 
-    pi->recv_seq++;
     pi->last_recv_time = ms;
   } catch (const std::exception &) {
     std::cerr << "[" << ms << "] decrypt failed from=" << peer_from
